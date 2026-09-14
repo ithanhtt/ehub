@@ -1,0 +1,20 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1789012791471,
+      "tag": "0000_tan_pyro",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1789023011407,
+      "tag": "0001_daily_kronos",
+      "breakpoints": true
+    }
+  ]
+}

@@ -1,0 +1,1 @@
+ALTER TABLE "connections" ADD COLUMN "last_test_hint" text;

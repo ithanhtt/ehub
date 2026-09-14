@@ -1,0 +1,52 @@
+{
+  "name": "adshub",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "dev:next": "next dev",
+    "build": "node scripts/prebuild.mjs && next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "node scripts/migrate.mjs",
+    "db:reset": "node scripts/reset.mjs",
+    "check:plugins": "node --conditions=react-server --import tsx scripts/check-plugins.ts",
+    "check": "npm run typecheck && npm run check:paths && npm run check:plugins",
+    "db:snapshot": "node scripts/snapshot.mjs",
+    "db:restore": "node scripts/restore.mjs",
+    "release:bundle": "node scripts/release-bundle.mjs",
+    "admin:grant": "node scripts/grant-admin.mjs",
+    "check:connectors": "node --conditions=react-server --env-file-if-exists=.env.local --import tsx scripts/check-connectors.ts",
+    "verify:live": "node --conditions=react-server --env-file-if-exists=.env.local --import tsx scripts/verify-live.ts",
+    "check:paths": "node --conditions=react-server --import tsx scripts/check-path-safety.ts"
+  },
+  "dependencies": {
+    "@electric-sql/pglite": "^0.2.17",
+    "@emotion/cache": "^11.14.0",
+    "@emotion/react": "^11.14.0",
+    "@emotion/styled": "^11.14.1",
+    "@mui/icons-material": "^9.4.0",
+    "@mui/material": "^9.4.0",
+    "@mui/material-nextjs": "^9.4.0",
+    "better-auth": "^1.2.7",
+    "drizzle-orm": "^0.45.2",
+    "next": "^16.3.4",
+    "next-intl": "^4.0.2",
+    "pg": "^8.14.1",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.0",
+    "@types/pg": "^8.11.11",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.1",
+    "drizzle-kit": "^0.31.4",
+    "server-only": "^0.0.1",
+    "tsx": "^4.23.13",
+    "typescript": "^5.8.3"
+  }
+}
