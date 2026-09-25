@@ -1,8 +1,8 @@
 'use client'
 
-import { useState } from 'react'
+import { useActionState, useEffect, useState } from 'react'
 import Link from 'next/link'
-import { useRouter, useSearchParams } from 'next/navigation'
+import { useSearchParams } from 'next/navigation'
 import { useTranslations } from 'next-intl'
 import Alert from '@mui/material/Alert'
 import AlertTitle from '@mui/material/AlertTitle'
@@ -16,45 +16,47 @@ import TextField from '@mui/material/TextField'
 import Typography from '@mui/material/Typography'
 import LoginOutlined from '@mui/icons-material/LoginOutlined'
 import PersonAddAltOutlined from '@mui/icons-material/PersonAddAltOutlined'
-import { authClient } from '@/core/auth/client'
+import { signInAction, type SignInState } from './actions'
 
+const INITIAL: SignInState = { error: null, email: '' }
+
+/**
+ * Posts to a server action (./actions): the form signs in the moment it is on
+ * screen, JavaScript or not — on a slow phone a tap no longer just reloads the
+ * page. Once the page runs, the same action is called without a reload, and
+ * its answer (an error, or the redirect) comes back the same way.
+ */
 export function LoginForm({ freshInstall }: { freshInstall: boolean }) {
   const t = useTranslations('auth')
-  const router = useRouter()
   const searchParams = useSearchParams()
-  // "/" reopens the overview of the project this browser was in last (see app/page.tsx).
+  // "/" reopens the overview of the project this browser was in last (see app/page.tsx); the server keeps it on this site.
   const redirectTo = searchParams.get('next') ?? '/'
 
-  const [email, setEmail] = useState('')
+  const [state, formAction, pending] = useActionState(signInAction, INITIAL)
+  // Held by the page once it runs, so a failed try keeps the address typed (a form action resets uncontrolled fields).
+  const [email, setEmail] = useState(state.email)
+  // Each answer brings back the address it was given (a page rendered without JavaScript starts from it too).
+  useEffect(() => {
+    if (state.email) setEmail(state.email)
+  }, [state])
   const [password, setPassword] = useState('')
-  const [error, setError] = useState<string | null>(null)
-  const [pending, setPending] = useState(false)
 
-  async function handleSubmit(event: React.FormEvent) {
-    event.preventDefault()
-    setError(null)
-    setPending(true)
-
-    const { error: authError } = await authClient.signIn.email({ email, password })
-
-    if (authError) {
-      /*
-       * Only a real credential rejection gets the credential message.
-       *
-       * The old code returned it for *every* failure, so an unreachable
-       * database or a 500 looked exactly like a typo — the one situation
-       * where the message actively misleads. 401 is the provider's answer for
-       * "these credentials do not work", and it stays deliberately vague about
-       * whether the account exists so it cannot be used to enumerate users.
-       */
-      setError(authError.status === 401 ? t('invalidCredentials') : t('signInUnavailable'))
-      setPending(false)
-      return
-    }
-
-    router.push(redirectTo)
-    router.refresh()
-  }
+  /*
+   * Only a real credential rejection gets the credential message: an
+   * unreachable database or a 500 must not look like a typo. The credential
+   * message stays vague about whether the account exists, so it cannot be
+   * used to find out who has one.
+   */
+  const error =
+    state.error === 'invalid'
+      ? t('invalidCredentials')
+      : state.error === 'tooMany'
+        ? t('tooManyAttempts')
+        : state.error === 'insecure'
+          ? t('signInInsecure', { url: state.url ?? '' })
+          : state.error === 'unavailable'
+            ? t('signInUnavailable')
+            : null
 
   return (
     <Card sx={{ boxShadow: '0 12px 32px -18px rgb(0 0 0 / 0.28)' }}>
@@ -92,13 +94,20 @@ export function LoginForm({ freshInstall }: { freshInstall: boolean }) {
           </Alert>
         ) : null}
 
-        <Stack component="form" onSubmit={handleSubmit} spacing={2.5} sx={{ mt: 3.5 }}>
-          {error ? <Alert severity="error">{error}</Alert> : null}
+        <Stack component="form" action={formAction} spacing={2.5} sx={{ mt: 3.5 }}>
+          {error ? (
+            <Alert severity="error" role="alert">
+              {error}
+            </Alert>
+          ) : null}
+          <input type="hidden" name="next" value={redirectTo} />
 
           <TextField
             label={t('email')}
             type="email"
+            name="email"
             autoComplete="email"
+            inputMode="email"
             required
             value={email}
             onChange={(e) => setEmail(e.target.value)}
@@ -108,6 +117,7 @@ export function LoginForm({ freshInstall }: { freshInstall: boolean }) {
           <TextField
             label={t('password')}
             type="password"
+            name="password"
             autoComplete="current-password"
             required
             value={password}

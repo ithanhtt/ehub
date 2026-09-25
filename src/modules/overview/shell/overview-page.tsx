@@ -1,6 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { useRouter } from 'next/navigation'
 import { useLocale, useTranslations } from 'next-intl'
 import Alert from '@mui/material/Alert'
 import Box from '@mui/material/Box'
@@ -27,6 +28,7 @@ import { DASHBOARD_RANGES, type DashboardData, type DashboardRange } from '../da
 import { OVERVIEW_SOURCES } from '../sources'
 import type { WidgetBand } from '../types'
 import { OVERVIEW_WIDGETS } from '../widgets'
+import { fillBand } from './band-layout'
 import { CustomRangePopover } from './custom-range'
 import { DashboardSourcesDialog } from './sources-dialog'
 import { SourceLine, StatusBadge } from './status-badge'
@@ -57,6 +59,8 @@ import { WidgetBoundary } from './widget-boundary'
 const LIVE_MS = 15_000
 /** …and while Sapo days are still coming in, so the progress moves as they land. */
 const SYNCING_MS = 4_000
+/** How long a load may take before the page gives up on it and says so. */
+const LOAD_TIMEOUT_MS = 90_000
 
 /** Past this, the "live" badge stops pulsing: something is holding the updates up. */
 const STALE_MS = 60_000
@@ -64,8 +68,10 @@ const STALE_MS = 60_000
 /** The bands, top to bottom, and the gap between the widgets in each. */
 const BANDS: ReadonlyArray<{ band: WidgetBand; spacing: number }> = [
   { band: 'notice', spacing: 2 },
-  { band: 'headline', spacing: 2 },
+  // Each source's numbers a section of its own, with air between them.
+  { band: 'headline', spacing: 3.5 },
   { band: 'trend', spacing: 2.5 },
+  { band: 'ads', spacing: 2.5 },
   { band: 'insight', spacing: 2.5 },
 ]
 
@@ -93,11 +99,14 @@ function acceptPeriod(value: unknown): PeriodChoice | null {
 export function OverviewDashboard({
   projectId,
   connected,
+  hidden,
   canConfigure,
 }: {
   projectId: string
   /** The connector plugins the project has usable connections for. */
   connected: string[]
+  /** Of those, the ones the project has left off its overview (the sources dialog brings them back). */
+  hidden: string[]
   /** May change which shops and channels the dashboard counts. */
   canConfigure: boolean
 }) {
@@ -109,30 +118,71 @@ export function OverviewDashboard({
   // Where the custom range's picker is anchored while open.
   const [pickerAnchor, setPickerAnchor] = useState<HTMLElement | null>(null)
   const [sourcesOpen, setSourcesOpen] = useState(false)
+  const router = useRouter()
   const [data, setData] = useState<DashboardData | null>(null)
   // The query `data` answers, so a change of period is told apart from a refresh.
   const [dataQuery, setDataQuery] = useState<string | null>(null)
+  const dataQueryRef = useRef<string | null>(null)
+  dataQueryRef.current = dataQuery
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const latest = useRef(0)
+  // Refreshes failed in a row: the first is let pass quietly while there are figures on screen.
+  const failedInRow = useRef(0)
   const query = range === 'custom' && custom ? `custom&from=${custom.from}&to=${custom.to}` : range
 
+  /*
+   * The request out now: a timed refresh never stacks a second one on it.
+   * Nothing is ever cancelled (no AbortController): a reply that is no longer
+   * wanted — a newer question was asked — is simply not used (`latest`), and
+   * a reply too slow is no longer waited for. Cancelling bought nothing (the
+   * server finishes the read anyway, and keeps it for the next ask), while an
+   * aborted fetch surfaces as an uncaught AbortError through browser
+   * extensions that wrap fetch.
+   */
+  const inFlight = useRef<{ q: string } | null>(null)
+
   const load = useCallback(
-    async (q: string) => {
+    async (q: string, { poll = false }: { poll?: boolean } = {}) => {
+      if (poll && inFlight.current?.q === q) return
+      const own = { q }
+      inFlight.current = own
+      // A reply that never comes must not leave the page loading for good: past the limit it is given up on.
+      let timedOut = false
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const deadline = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          timedOut = true
+          reject(new Error('timeout'))
+        }, LOAD_TIMEOUT_MS)
+      })
       const id = ++latest.current
       setLoading(true)
       try {
-        const response = await fetch(`/api/projects/${projectId}/dashboard?range=${q}`, { cache: 'no-store' })
-        if (!response.ok) throw new Error(response.status === 403 ? t('forbidden') : `HTTP ${response.status}`)
-        const next = (await response.json()) as DashboardData
+        const reply = (async () => {
+          const response = await fetch(`/api/projects/${projectId}/dashboard?range=${q}`, { cache: 'no-store' })
+          if (!response.ok) throw new Error(response.status === 403 ? t('forbidden') : `HTTP ${response.status}`)
+          return (await response.json()) as DashboardData
+        })()
+        // A reply that lands after the deadline is dropped quietly.
+        reply.catch(() => {})
+        const next = await Promise.race([reply, deadline])
         if (id === latest.current) {
           setData(next)
           setDataQuery(q)
           setError(null)
+          failedInRow.current = 0
         }
       } catch (reason) {
-        if (id === latest.current) setError(reason instanceof Error ? reason.message : String(reason))
+        if (id === latest.current) {
+          failedInRow.current += 1
+          // A timed refresh of the figures already shown may fail once without a word; the next one tries again.
+          const quiet = poll && failedInRow.current < 2 && dataQueryRef.current === q
+          if (!quiet) setError(timedOut ? t('loadTimeout') : reason instanceof Error ? reason.message : String(reason))
+        }
       } finally {
+        clearTimeout(timer)
+        if (inFlight.current === own) inFlight.current = null
         if (id === latest.current) setLoading(false)
       }
     },
@@ -149,16 +199,19 @@ export function OverviewDashboard({
   // Live updates while the tab is visible; coming back to it fetches at once
   // instead of showing numbers that went stale in the background.
   const sync = data?.sapo?.sync
-  const syncing = Boolean(
-    sync && (sync.current > 0 || sync.previous > 0 || sync.returns > 0 || sync.catchingUp || (data?.sapo?.products.pendingDays ?? 0) > 0),
-  )
+  const syncing =
+    Boolean(sync && (sync.current > 0 || sync.previous > 0 || sync.returns > 0 || sync.catchingUp || (data?.sapo?.products.pendingDays ?? 0) > 0)) ||
+    // Products, or TikTok Shop days, still on their way are asked for again soon.
+    Boolean(data?.gmvMax?.products.pending) ||
+    (data?.gmvMax?.pendingDays ?? 0) > 0 ||
+    (data?.tiktokShop?.pendingDays ?? 0) > 0
   useEffect(() => {
     if (!hydrated) return
     const timer = setInterval(() => {
-      if (document.visibilityState === 'visible') void load(query)
+      if (document.visibilityState === 'visible') void load(query, { poll: true })
     }, syncing ? SYNCING_MS : LIVE_MS)
     const onVisible = () => {
-      if (document.visibilityState === 'visible') void load(query)
+      if (document.visibilityState === 'visible') void load(query, { poll: true })
     }
     document.addEventListener('visibilitychange', onVisible)
     return () => {
@@ -174,8 +227,41 @@ export function OverviewDashboard({
     return () => clearInterval(timer)
   }, [])
 
-  // The sources this project has connected; the page and its widgets read only these.
-  const sources = OVERVIEW_SOURCES.filter((source) => connected.includes(source.pluginId))
+  // The sources this project has connected and shows; the page and its widgets read only these.
+  const sources = OVERVIEW_SOURCES.filter((source) => connected.includes(source.pluginId) && !hidden.includes(source.pluginId))
+  const sourcesDialog = (
+    <DashboardSourcesDialog
+      projectId={projectId}
+      open={sourcesOpen}
+      canConfigure={canConfigure}
+      onClose={() => setSourcesOpen(false)}
+      onSaved={() => {
+        setSourcesOpen(false)
+        // What is shown comes with the page (hidden sources): read it again, then the numbers.
+        router.refresh()
+        void load(query)
+      }}
+    />
+  )
+
+  // Every connected source hidden: the way back to them, not an invitation to connect.
+  if (sources.length === 0 && OVERVIEW_SOURCES.some((source) => connected.includes(source.pluginId))) {
+    return (
+      <>
+        <EmptyState
+          icon={<TuneOutlined sx={{ fontSize: 32 }} />}
+          title={t('allHidden')}
+          description={t('allHiddenHint')}
+          action={
+            <Button variant="contained" onClick={() => setSourcesOpen(true)}>
+              {t('chooseSources')}
+            </Button>
+          }
+        />
+        {sourcesDialog}
+      </>
+    )
+  }
 
   if (sources.length === 0) {
     return (
@@ -254,7 +340,7 @@ export function OverviewDashboard({
             aria-label={t('period')}
           >
             {DASHBOARD_RANGES.map((option) => (
-              <ToggleButton key={option} value={option} sx={{ px: 2, textTransform: 'none', fontWeight: 600 }}>
+              <ToggleButton key={option} value={option} sx={{ px: { xs: 1.25, sm: 2 }, textTransform: 'none', fontWeight: 600 }}>
                 {t(`ranges.${option}`)}
               </ToggleButton>
             ))}
@@ -277,15 +363,18 @@ export function OverviewDashboard({
               setPickerAnchor(null)
             }}
           />
-          <Button
-            size="small"
-            variant="outlined"
-            color="inherit"
-            startIcon={<TuneOutlined sx={{ fontSize: 16 }} />}
-            onClick={() => setSourcesOpen(true)}
-          >
-            {t('chooseSources')}
-          </Button>
+          {/* Every connected source can be shown or hidden, and most have more to choose. */}
+          {OVERVIEW_SOURCES.some((source) => connected.includes(source.pluginId)) ? (
+            <Button
+              size="small"
+              variant="outlined"
+              color="inherit"
+              startIcon={<TuneOutlined sx={{ fontSize: 16 }} />}
+              onClick={() => setSourcesOpen(true)}
+            >
+              {t('chooseSources')}
+            </Button>
+          ) : null}
           {data ? (
             <Typography variant="caption" sx={{ color: 'text.secondary' }}>
               {scopeText}
@@ -336,7 +425,8 @@ export function OverviewDashboard({
           </StatusBadge>
           <Tooltip title={t('refresh')}>
             <span>
-              <IconButton size="small" onClick={() => void load(query)} disabled={loading} aria-label={t('refresh')}>
+              {/* Held only while another period loads: the background refreshes every few seconds and would make it flicker. */}
+              <IconButton size="small" onClick={() => void load(query)} disabled={switching} aria-label={t('refresh')}>
                 <RefreshOutlined fontSize="small" />
               </IconButton>
             </span>
@@ -348,9 +438,10 @@ export function OverviewDashboard({
 
       {!data || !context ? (
         <Grid container spacing={2}>
-          {Array.from({ length: 6 }, (_, i) => (
-            <Grid key={i} size={{ xs: 12, sm: 4, xl: 2 }}>
-              <Skeleton variant="rounded" height={104} />
+          {/* The shape of what comes: the scorecard's four tiles, then the charts — so nothing jumps when it lands. */}
+          {Array.from({ length: 4 }, (_, i) => (
+            <Grid key={i} size={{ xs: 6, md: 3 }}>
+              <Skeleton variant="rounded" height={132} />
             </Grid>
           ))}
           {Array.from({ length: 2 }, (_, i) => (
@@ -372,13 +463,13 @@ export function OverviewDashboard({
               {BANDS.map(({ band, spacing }) => {
                 const row = widgets.filter((widget) => widget.band === band).sort((a, b) => a.order - b.order)
                 if (row.length === 0) return null
+                // Each widget's own width, then every row widened to the full width: a band that
+                // lost a widget (taken away, or its source not connected) leaves no gap (band-layout.ts).
+                const sizes = fillBand(row.map((widget) => (typeof widget.size === 'function' ? widget.size({ count: row.length }) : widget.size)))
                 return (
                   <Grid key={band} container spacing={spacing}>
-                    {row.map((widget) => (
-                      <Grid
-                        key={widget.id}
-                        size={typeof widget.size === 'function' ? widget.size({ count: row.length }) : widget.size}
-                      >
+                    {row.map((widget, i) => (
+                      <Grid key={widget.id} size={sizes[i]}>
                         <WidgetBoundary id={widget.id} resetKey={data.generatedAt}>
                           <widget.Component />
                         </WidgetBoundary>
@@ -392,16 +483,7 @@ export function OverviewDashboard({
         </OverviewProvider>
       )}
 
-      <DashboardSourcesDialog
-        projectId={projectId}
-        open={sourcesOpen}
-        canConfigure={canConfigure}
-        onClose={() => setSourcesOpen(false)}
-        onSaved={() => {
-          setSourcesOpen(false)
-          void load(query)
-        }}
-      />
+      {sourcesDialog}
     </Stack>
   )
 }

@@ -10,10 +10,13 @@ import type { OverviewContextValue } from './context'
  */
 
 /** The data sources the page reads, each fed by a connector plugin (see sources.ts). */
-export type OverviewSource = 'tiktok' | 'sapo'
+export type OverviewSource = 'tiktok' | 'tiktokShop' | 'sapo'
 
-/** The page's bands, top to bottom: notices, headline numbers, trends, then smaller cards. */
-export type WidgetBand = 'notice' | 'headline' | 'trend' | 'insight'
+/**
+ * The page's bands, top to bottom: notices, headline numbers, trends, the ads
+ * review (spend and revenue by hour and by product), then smaller cards.
+ */
+export type WidgetBand = 'notice' | 'headline' | 'trend' | 'ads' | 'insight'
 
 /** A width on the page's 12-column grid, per breakpoint. */
 export type WidgetSize = Partial<Record<'xs' | 'sm' | 'md' | 'lg' | 'xl', number>>

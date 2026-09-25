@@ -57,6 +57,60 @@ export interface AuthSpec {
   oauth?: OAuthSpec
   /** Shown above the form: where to obtain these values. */
   instructions?: LocalizedText
+  /**
+   * A step-by-step walk-through shown in the connection dialog, for a
+   * provider whose setup happens mostly elsewhere (a cloud console, sharing a
+   * file) and cannot fit in `instructions`. Plain data, like the rest of the
+   * contract: the dialog renders whatever a connector declares.
+   */
+  guide?: ConnectionGuide
+}
+
+/* ----------------------------------------------------------------- guide --- */
+
+/**
+ * Text of a guide may mark **bold** and `code`; nothing else is interpreted,
+ * so a guide can never inject markup.
+ */
+export interface ConnectionGuide {
+  /** The ways to connect, as tabs when there are several; the first opens first. */
+  methods: GuideMethod[]
+  /** Reference tables after the steps — what a file must look like, say. */
+  references?: GuideReference[]
+  /** What the provider says, what it means, and what to do. */
+  troubleshooting?: Array<{ problem: LocalizedText; fix: LocalizedText }>
+}
+
+export interface GuideMethod {
+  id: string
+  label: LocalizedText
+  /** A short tag beside the label ("recommended"). */
+  badge?: LocalizedText
+  /** One line on when to choose it. */
+  summary?: LocalizedText
+  steps: GuideStep[]
+}
+
+export interface GuideStep {
+  title: LocalizedText
+  /** The step's lines, in order. */
+  lines: LocalizedText[]
+  links?: Array<{ href: string; label: LocalizedText }>
+  /** Said in a warning tone, after the lines. */
+  caution?: LocalizedText
+  /**
+   * A value to copy at this step, shown with a copy button: read live from a
+   * form field as the user fills it (a key inside pasted JSON), or else from
+   * the saved connection's metadata.
+   */
+  copy?: { label: LocalizedText; field?: { key: string; jsonKey?: string }; metadataKey?: string; pending: LocalizedText }
+}
+
+export interface GuideReference {
+  title: LocalizedText
+  columns: LocalizedText[]
+  rows: LocalizedText[][]
+  note?: LocalizedText
 }
 
 /* -------------------------------------------------------------- endpoints --- */
@@ -315,6 +369,18 @@ export interface ConnectorPlugin {
   }): Promise<CredentialResolution>
 
   /**
+   * Renews a credential that expires on its own — an OAuth access token with a
+   * refresh token beside it — before a call is made with it.
+   *
+   * Returns null when nothing is due (the common case, and it must be cheap:
+   * it runs ahead of every use). Otherwise the renewed credentials are merged
+   * into the stored bag and re-encrypted by core/plugins/fresh-credentials,
+   * the one place outside a save or an action that writes credentials; `ok:
+   * false` leaves them as they are and the call goes ahead to fail visibly.
+   */
+  refreshCredentials?(context: ConnectionContext): Promise<CredentialResolution | null>
+
+  /**
    * Fills in params the connection can supply, before validation runs.
    *
    * Kept separate from `buildRequest` so that a value sourced from the
@@ -353,6 +419,15 @@ export interface ConnectorPlugin {
    * signs per-endpoint can override it.
    */
   customHeaders?(context: ConnectionContext): Record<string, string>
+
+  /**
+   * Finishes a request the catalogue does not describe, once its URL, headers
+   * and body are known — for a provider that signs every request over exactly
+   * those (TikTok Shop), or needs a token fetched first (a Google service
+   * account). The URL may gain query parameters but must stay on the same
+   * host and path: it has already been checked to lie inside the base URL.
+   */
+  prepareCustomRequest?(request: PreparedRequest, context: ConnectionContext): Promise<PreparedRequest>
 
   /**
    * Cheap credential check. Implementations should call the lightest

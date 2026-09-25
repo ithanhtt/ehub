@@ -24,6 +24,7 @@ import Paper from '@mui/material/Paper'
 import Snackbar from '@mui/material/Snackbar'
 import Stack from '@mui/material/Stack'
 import TextField from '@mui/material/TextField'
+import { CredentialField, NO_AUTOFILL } from '@/components/ui/credential-field'
 import Tooltip from '@mui/material/Tooltip'
 import Typography from '@mui/material/Typography'
 import AddOutlined from '@mui/icons-material/AddOutlined'
@@ -44,6 +45,7 @@ import {
 } from '@/features/connections/actions'
 import { EmptyState } from '@/components/ui/page-header'
 import { TestFeedback } from './test-feedback'
+import { ConnectionGuideView } from './connection-guide'
 import { ConnectorActions } from './connector-actions'
 import { formatDateTime } from '@/core/utils/format'
 import type { Locale } from '@/i18n/config'
@@ -513,12 +515,16 @@ function ConnectionDialog({
     notFound: te('notFound'),
   }
   const failed = !state.ok && Boolean(state.message || state.testHint)
+  // What has been typed so far, for a guide step that copies from it (the email inside a pasted key).
+  const [typed, setTyped] = useState<Record<string, string>>({})
 
   return (
     <Dialog
       open={open}
       onClose={() => (pending ? null : onClose())}
-      maxWidth="sm"
+      // A walk-through needs the room; a plain form does not.
+      maxWidth={plugin?.authGuide ? 'md' : 'sm'}
+      fullWidth={Boolean(plugin?.authGuide)}
       slotProps={{ transition: { onExited } }}
     >
       {plugin ? (
@@ -528,6 +534,16 @@ function ConnectionDialog({
         <Box
           component="form"
           action={formAction}
+          autoComplete="off"
+          // Not a login: password managers are told to leave the whole form alone (see CredentialField).
+          data-1p-ignore="true"
+          data-lpignore="true"
+          data-bwignore="true"
+          data-form-type="other"
+          onInput={(event) => {
+            const input = event.target as HTMLInputElement
+            if (input.name?.startsWith('cred_')) setTyped((current) => ({ ...current, [input.name.slice(5)]: input.value }))
+          }}
           sx={{ display: 'flex', flexDirection: 'column', minHeight: 0 }}
         >
           <DialogTitle sx={{ fontSize: '1rem', fontWeight: 600 }}>
@@ -564,14 +580,26 @@ function ConnectionDialog({
                 </Alert>
               ) : null}
 
+              {plugin.authGuide ? (
+                <ConnectionGuideView
+                  guide={plugin.authGuide}
+                  locale={locale}
+                  fields={typed}
+                  metadata={connection?.metadata ?? {}}
+                  // Folded until asked for: the form stays the first thing in view.
+                  defaultOpen={false}
+                />
+              ) : null}
+
               <input type="hidden" name="pluginId" value={plugin.id} />
 
               <TextField
-                name="name"
+                // Not "name": browsers take a field called that for a person's name and offer to fill it.
+                name="connectionName"
                 label={t('connectionName')}
                 required
                 defaultValue={connection?.name ?? ''}
-                slotProps={{ htmlInput: { maxLength: 120 } }}
+                slotProps={{ htmlInput: { maxLength: 120, ...NO_AUTOFILL } }}
                 placeholder={`${plugin.name} – ${locale === 'vi' ? 'tài khoản chính' : 'main account'}`}
                 helperText={t('connectionNameHint')}
               />
@@ -598,11 +626,11 @@ function ConnectionDialog({
                   {plugin.authFields.map((field) => {
                     const stored = connection?.fieldState.find((f) => f.key === field.key)
                     return (
-                      <TextField
+                      <CredentialField
                         key={field.key}
                         name={`cred_${field.key}`}
                         label={`${field.label[locale]}${field.required ? '' : ` (${tc('optional')})`}`}
-                        type={field.type === 'password' ? 'password' : 'text'}
+                        secret={field.type === 'password' || Boolean(field.secret)}
                         // A stored secret is required but must not be re-typed
                         // to save an unrelated change, so the browser
                         // requirement drops once a value exists; the server
@@ -614,7 +642,6 @@ function ConnectionDialog({
                             ? t('secretStored')
                             : (field.placeholder ?? '')
                         }
-                        autoComplete="off"
                         helperText={field.help?.[locale]}
                         slotProps={{
                           htmlInput: { style: { fontFamily: MONO_STACK, fontSize: 13 } },

@@ -141,7 +141,7 @@ export async function createConnection(
   }
 
   const pluginId = String(formData.get('pluginId') ?? '')
-  const name = String(formData.get('name') ?? '').trim()
+  const name = String(formData.get('connectionName') ?? formData.get('name') ?? '').trim()
   if (!pluginId || !name) return fail('validation')
 
   let plugin
@@ -233,7 +233,7 @@ export async function updateConnection(
     return fail('validation')
   }
 
-  const name = String(formData.get('name') ?? '').trim()
+  const name = String(formData.get('connectionName') ?? formData.get('name') ?? '').trim()
   if (!name) return fail('validation')
 
   let previous: Record<string, string> = {}
@@ -251,11 +251,31 @@ export async function updateConnection(
     return { ok: false, message: resolved.message, testHint: resolved.hint }
   }
 
+  // A secret left blank meant "keep what is stored" — what is stored *now*: a token renewed in the
+  // background while this form was open (core/plugins/fresh-credentials) must not be written over
+  // with the copy read above.
+  let stored = resolved.credentials
+  const [latest] = await db.select().from(connections).where(eq(connections.id, connectionId)).limit(1)
+  if (latest && latest.updatedAt.getTime() !== row.updatedAt.getTime()) {
+    let current: Record<string, string> = {}
+    try {
+      current = latest.credentials ? decryptJson(latest.credentials) : {}
+    } catch {
+      current = {}
+    }
+    stored = { ...resolved.credentials }
+    for (const field of plugin.auth.fields) {
+      const typed = String(formData.get(`cred_${field.key}`) ?? '').trim()
+      const kept = !typed && stored[field.key] === previous[field.key]
+      if (field.secret && kept && current[field.key]) stored[field.key] = current[field.key]
+    }
+  }
+
   await db
     .update(connections)
     .set({
       name,
-      credentials: encryptJson(resolved.credentials),
+      credentials: encryptJson(stored),
       ...(resolved.metadata
         ? { metadata: { ...((row.metadata ?? {}) as Record<string, unknown>), ...resolved.metadata } }
         : {}),
@@ -270,7 +290,7 @@ export async function updateConnection(
     action: 'connection.update',
     targetType: 'connection',
     targetId: connectionId,
-    detail: { name, fields: Object.keys(resolved.credentials) },
+    detail: { name, fields: Object.keys(stored) },
   })
 
   const test = await runPluginTest(connectionId, projectId)

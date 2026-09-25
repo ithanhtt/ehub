@@ -1,0 +1,690 @@
+import type { EndpointSpec, PaginationSpec, ParamSpec } from '@/core/plugins/types'
+
+/**
+ * TikTok Shop Partner API catalogue (read-only), versions as the Partner
+ * Center documents them. Paths carry their version; there is no `version`
+ * parameter. Every shop-scoped call takes `shop_cipher` (the connection fills
+ * it in); the authorization call must not (TikTok answers 36009004).
+ *
+ * Responses are `{ code, message, request_id, data }` — code 0 on success.
+ * Lists page by an opaque `page_token`, the next one at `data.next_page_token`.
+ */
+
+export const SHOPS = 'shops'
+export const ORDERS_SEARCH = 'orders-search'
+export const AFFILIATE_ORDERS_SEARCH = 'affiliate-orders-search'
+export const PRODUCTS_SEARCH = 'products-search'
+export const SHOP_PRODUCTS_PERFORMANCE = 'analytics-shop-products'
+export const PRODUCT_PERFORMANCE = 'analytics-product'
+export const SHOP_VIDEOS_PERFORMANCE = 'analytics-shop-videos'
+
+/** Paths that are not shop-scoped: no shop_cipher is sent to them. */
+export const UNSCOPED_PATHS = new Set(['/authorization/202309/shops'])
+
+const shopCipher: ParamSpec = {
+  key: 'shop_cipher',
+  label: { vi: 'Shop cipher', en: 'Shop cipher' },
+  in: 'query',
+  type: 'string',
+  required: true,
+  satisfiedByConnection: true,
+  help: { vi: 'Để trống: dùng shop của kết nối.', en: "Leave blank to use the connection's shop." },
+}
+
+const pageSize = (max: number, fallback = 50): ParamSpec => ({
+  key: 'page_size',
+  label: { vi: 'Số dòng/trang', en: 'Page size' },
+  in: 'query',
+  type: 'number',
+  required: true,
+  defaultValue: fallback,
+  help: { vi: `Tối đa ${max}.`, en: `At most ${max}.` },
+})
+
+const pageToken: ParamSpec = {
+  key: 'page_token',
+  label: { vi: 'Page token', en: 'Page token' },
+  in: 'query',
+  type: 'string',
+  help: { vi: 'Lấy từ next_page_token của trang trước.', en: 'From the previous page’s next_page_token.' },
+}
+
+const cursor: PaginationSpec = {
+  style: 'cursor',
+  cursorParam: 'page_token',
+  sizeParam: 'page_size',
+  nextCursorPath: 'data.next_page_token',
+  defaultPageSize: 50,
+  maxPageSize: 100,
+}
+
+const unixTime = (key: string, vi: string, en: string, where: 'body' | 'query' = 'body'): ParamSpec => ({
+  key,
+  label: { vi, en },
+  in: where,
+  type: 'number',
+  placeholder: '1757350800',
+  help: { vi: 'Unix timestamp (giây).', en: 'Unix timestamp (seconds).' },
+})
+
+const createdBetween = (where: 'body' | 'query' = 'body'): ParamSpec[] => [
+  unixTime('create_time_ge', 'Tạo từ', 'Created from', where),
+  unixTime('create_time_lt', 'Tạo trước', 'Created before', where),
+]
+
+const sortField = (values: string[], required = false): ParamSpec => ({
+  key: 'sort_field',
+  label: { vi: 'Sắp xếp theo', en: 'Sort field' },
+  in: 'query',
+  type: 'enum',
+  required,
+  defaultValue: values[0],
+  options: values.map((value) => ({ value, label: value })),
+})
+
+const pathId = (key: string, label: string): ParamSpec => ({ key, label: { vi: label, en: label }, in: 'path', type: 'string', required: true })
+
+const dateBound = (key: 'start_date_ge' | 'end_date_lt'): ParamSpec => ({
+  key,
+  label: key === 'start_date_ge' ? { vi: 'Từ ngày (gồm)', en: 'From (inclusive)' } : { vi: 'Đến ngày (không gồm)', en: 'To (exclusive)' },
+  in: 'query',
+  type: 'date',
+  required: true,
+  placeholder: 'YYYY-MM-DD',
+  help: { vi: 'Theo múi giờ của shop.', en: "In the shop's time zone." },
+})
+
+const currency: ParamSpec = {
+  key: 'currency',
+  label: { vi: 'Tiền tệ', en: 'Currency' },
+  in: 'query',
+  type: 'enum',
+  defaultValue: 'LOCAL',
+  options: [
+    { value: 'LOCAL', label: 'LOCAL' },
+    { value: 'USD', label: 'USD' },
+  ],
+}
+
+const granularity: ParamSpec = {
+  key: 'granularity',
+  label: { vi: 'Chia theo', en: 'Granularity' },
+  in: 'query',
+  type: 'enum',
+  defaultValue: '1D',
+  options: [
+    { value: '1D', label: '1D' },
+    { value: 'ALL', label: 'ALL' },
+  ],
+}
+
+const DOCS = 'https://partner.tiktokshop.com/docv2/page'
+
+export const tiktokShopEndpoints: EndpointSpec[] = [
+  {
+    id: SHOPS,
+    group: 'Authorization',
+    name: { vi: 'Các shop đã uỷ quyền', en: 'Authorized shops' },
+    description: {
+      vi: 'id, tên, khu vực và cipher của từng shop — cipher là giá trị mọi API theo shop cần. Endpoint nhẹ nhất, dùng để kiểm tra kết nối.',
+      en: 'Each shop’s id, name, region and cipher — the cipher every shop-scoped call needs. The lightest call; used to test the connection.',
+    },
+    method: 'GET',
+    path: '/authorization/202309/shops',
+    docsUrl: `${DOCS}/6507ead7b99d5302be949ba9`,
+    resultPath: 'data.shops',
+    params: [],
+  },
+  {
+    id: ORDERS_SEARCH,
+    group: 'Order',
+    name: { vi: 'Tìm đơn hàng', en: 'Search orders' },
+    description: {
+      vi: 'Đơn theo thời gian tạo hoặc cập nhật. payment có platform_discount (voucher TikTok) và seller_discount (voucher shop); mỗi dòng line_items là một đơn vị sản phẩm.',
+      en: 'Orders by creation or update time. payment carries platform_discount (TikTok vouchers) and seller_discount (shop vouchers); each line_items row is one unit.',
+    },
+    method: 'POST',
+    path: '/order/202309/orders/search',
+    docsUrl: `${DOCS}/650aa8094a0bb702c06df242`,
+    resultPath: 'data.orders',
+    idField: 'id',
+    pagination: cursor,
+    params: [
+      shopCipher,
+      pageSize(100),
+      pageToken,
+      {
+        key: 'sort_field',
+        label: { vi: 'Sắp xếp theo', en: 'Sort field' },
+        in: 'query',
+        type: 'enum',
+        defaultValue: 'create_time',
+        options: [
+          { value: 'create_time', label: 'create_time' },
+          { value: 'update_time', label: 'update_time' },
+        ],
+      },
+      {
+        key: 'sort_order',
+        label: { vi: 'Thứ tự', en: 'Sort order' },
+        in: 'query',
+        type: 'enum',
+        defaultValue: 'DESC',
+        options: [
+          { value: 'DESC', label: 'DESC' },
+          { value: 'ASC', label: 'ASC' },
+        ],
+      },
+      {
+        key: 'order_status',
+        label: { vi: 'Trạng thái', en: 'Status' },
+        in: 'body',
+        type: 'enum',
+        options: ['UNPAID', 'ON_HOLD', 'AWAITING_SHIPMENT', 'PARTIALLY_SHIPPING', 'AWAITING_COLLECTION', 'IN_TRANSIT', 'DELIVERED', 'COMPLETED', 'CANCELLED'].map(
+          (value) => ({ value, label: value }),
+        ),
+      },
+      unixTime('create_time_ge', 'Tạo từ', 'Created from'),
+      unixTime('create_time_lt', 'Tạo trước', 'Created before'),
+      unixTime('update_time_ge', 'Cập nhật từ', 'Updated from'),
+      unixTime('update_time_lt', 'Cập nhật trước', 'Updated before'),
+    ],
+  },
+  {
+    id: 'order-price-detail',
+    group: 'Order',
+    name: { vi: 'Chi tiết giá một đơn (voucher)', en: 'Price detail of an order (vouchers)' },
+    description: {
+      vi: 'Phần giảm của shop và của TikTok trên tiền hàng và phí ship, theo đơn và theo từng dòng.',
+      en: 'The seller’s and TikTok’s deductions on the subtotal and shipping, per order and per line.',
+    },
+    method: 'GET',
+    path: '/order/202407/orders/{order_id}/price_detail',
+    docsUrl: `${DOCS}/66ce16cadefa5102ffda9c6b`,
+    params: [shopCipher, { key: 'order_id', label: { vi: 'Order ID', en: 'Order ID' }, in: 'path', type: 'string', required: true }],
+  },
+  {
+    id: AFFILIATE_ORDERS_SEARCH,
+    group: 'Affiliate',
+    name: { vi: 'Đơn affiliate (KOC)', en: 'Affiliate orders (creators)' },
+    description: {
+      vi: 'Đơn đến từ creator: skus[] có creator_username, content_type (VIDEO, LIVE…), content_id (ID video), price × quantity, và hoa hồng dự kiến/thực tế. Tối đa 3 tháng một lần gọi. Cần scope Read Seller Affiliate Collaboration.',
+      en: 'Orders attributed to creators: skus[] carry creator_username, content_type (VIDEO, LIVE…), content_id (the video id), price × quantity, and estimated/actual commission. At most 3 months per call. Needs the Read Seller Affiliate Collaboration scope.',
+    },
+    method: 'POST',
+    path: '/affiliate_seller/202410/orders/search',
+    docsUrl: `${DOCS}/6722babac7ef47030dc00d11`,
+    resultPath: 'data.orders',
+    idField: 'id',
+    pagination: cursor,
+    params: [shopCipher, pageSize(100), pageToken, unixTime('create_time_ge', 'Tạo từ', 'Created from'), unixTime('create_time_lt', 'Tạo trước', 'Created before')],
+  },
+  {
+    id: PRODUCTS_SEARCH,
+    group: 'Product',
+    name: { vi: 'Tìm sản phẩm', en: 'Search products' },
+    description: {
+      vi: 'Sản phẩm và SKU (skus[].seller_sku — mã dùng để khớp với Sapo). Tối đa 10.000 kết quả.',
+      en: 'Products and their SKUs (skus[].seller_sku — what matches them to Sapo). At most 10,000 results.',
+    },
+    method: 'POST',
+    path: '/product/202502/products/search',
+    resultPath: 'data.products',
+    idField: 'id',
+    pagination: cursor,
+    params: [
+      shopCipher,
+      pageSize(100),
+      pageToken,
+      {
+        key: 'status',
+        label: { vi: 'Trạng thái', en: 'Status' },
+        in: 'body',
+        type: 'enum',
+        options: ['ALL', 'DRAFT', 'PENDING', 'FAILED', 'ACTIVATE', 'SELLER_DEACTIVATED', 'PLATFORM_DEACTIVATED', 'FREEZE', 'DELETED'].map((value) => ({ value, label: value })),
+      },
+      { key: 'seller_skus', label: { vi: 'Seller SKU', en: 'Seller SKUs' }, in: 'body', type: 'string[]', help: { vi: 'Tối đa 10.', en: 'At most 10.' } },
+    ],
+  },
+  {
+    id: 'product-detail',
+    group: 'Product',
+    name: { vi: 'Chi tiết sản phẩm', en: 'Product detail' },
+    method: 'GET',
+    path: '/product/202309/products/{product_id}',
+    params: [shopCipher, { key: 'product_id', label: { vi: 'Product ID', en: 'Product ID' }, in: 'path', type: 'string', required: true }],
+  },
+  {
+    id: SHOP_PRODUCTS_PERFORMANCE,
+    group: 'Analytics',
+    name: { vi: 'Hiệu quả các sản phẩm', en: 'Product performance' },
+    description: {
+      vi: 'Mỗi sản phẩm: GMV, đơn, và theo kênh — trong đó affiliate_video_performance.new_video_count là số video mới của creator. Dữ liệu trễ khoảng 1–2 ngày (xem latest_available_date). Cần scope TikTok Shop Analytics.',
+      en: 'Per product: GMV, orders, and per channel — affiliate_video_performance.new_video_count is the creators’ new videos. Lags about 1–2 days (see latest_available_date). Needs the TikTok Shop Analytics scope.',
+    },
+    method: 'GET',
+    path: '/analytics/202605/shop_products/performance',
+    docsUrl: `${DOCS}/6a0eb07f0ca484049f4eb838`,
+    resultPath: 'data.products',
+    idField: 'id',
+    pagination: cursor,
+    params: [
+      shopCipher,
+      dateBound('start_date_ge'),
+      dateBound('end_date_lt'),
+      pageSize(100),
+      pageToken,
+      {
+        key: 'sort_field',
+        label: { vi: 'Sắp xếp theo', en: 'Sort field' },
+        in: 'query',
+        type: 'enum',
+        defaultValue: 'gmv',
+        options: ['gmv', 'items_sold', 'orders'].map((value) => ({ value, label: value })),
+      },
+      currency,
+    ],
+  },
+  {
+    id: PRODUCT_PERFORMANCE,
+    group: 'Analytics',
+    name: { vi: 'Hiệu quả một sản phẩm (theo ngày, số sao)', en: 'One product’s performance (daily, ratings)' },
+    description: {
+      vi: 'intervals[] theo ngày (GMV, đơn, huỷ/hoàn) và ratings[] — phân bố đánh giá 1–5 sao. TikTok không có API liệt kê từng đánh giá.',
+      en: 'Daily intervals[] (GMV, orders, cancellations/refunds) and ratings[] — the 1–5 star distribution. TikTok has no API listing individual reviews.',
+    },
+    method: 'GET',
+    path: '/analytics/202509/shop_products/{product_id}/performance',
+    docsUrl: `${DOCS}/6960bc17fc4f4304a0f3a345`,
+    params: [
+      shopCipher,
+      { key: 'product_id', label: { vi: 'Product ID', en: 'Product ID' }, in: 'path', type: 'string', required: true },
+      dateBound('start_date_ge'),
+      dateBound('end_date_lt'),
+      granularity,
+      currency,
+    ],
+  },
+  {
+    id: SHOP_VIDEOS_PERFORMANCE,
+    group: 'Analytics',
+    name: { vi: 'Hiệu quả các video', en: 'Video performance' },
+    description: {
+      vi: 'Mỗi video: người đăng, video_post_time, sản phẩm gắn kèm, GMV, đơn, lượt xem. account_type=AFFILIATE_ACCOUNTS cho video của creator.',
+      en: 'Per video: its creator, video_post_time, the products attached, GMV, orders, views. account_type=AFFILIATE_ACCOUNTS for creators’ videos.',
+    },
+    method: 'GET',
+    path: '/analytics/202605/shop_videos/performance',
+    docsUrl: `${DOCS}/6a0eaab9f76068049e936023`,
+    resultPath: 'data.videos',
+    idField: 'id',
+    pagination: cursor,
+    params: [
+      shopCipher,
+      dateBound('start_date_ge'),
+      dateBound('end_date_lt'),
+      pageSize(100),
+      pageToken,
+      {
+        key: 'account_type',
+        label: { vi: 'Loại tài khoản', en: 'Account type' },
+        in: 'query',
+        type: 'enum',
+        defaultValue: 'ALL',
+        options: ['ALL', 'OFFICIAL_ACCOUNTS', 'MARKETING_ACCOUNTS', 'AFFILIATE_ACCOUNTS'].map((value) => ({ value, label: value })),
+      },
+      currency,
+    ],
+  },
+  {
+    id: 'analytics-video',
+    group: 'Analytics',
+    name: { vi: 'Hiệu quả một video (theo ngày)', en: 'One video’s performance (daily)' },
+    method: 'GET',
+    path: '/analytics/202509/shop_videos/{video_id}/performance',
+    params: [
+      shopCipher,
+      { key: 'video_id', label: { vi: 'Video ID', en: 'Video ID' }, in: 'path', type: 'string', required: true },
+      dateBound('start_date_ge'),
+      dateBound('end_date_lt'),
+      granularity,
+      currency,
+    ],
+  },
+  {
+    id: 'analytics-shop',
+    group: 'Analytics',
+    name: { vi: 'Hiệu quả toàn shop (theo ngày)', en: 'Shop performance (daily)' },
+    description: {
+      vi: 'performance.intervals[] theo ngày: GMV, đơn, khách, lượt xem, chuyển đổi của cả shop. Dữ liệu trễ 1–2 ngày.',
+      en: 'Daily performance.intervals[]: the whole shop’s GMV, orders, buyers, views and conversion. Lags 1–2 days.',
+    },
+    method: 'GET',
+    path: '/analytics/202509/shop/performance',
+    resultPath: 'data.performance.intervals',
+    params: [shopCipher, dateBound('start_date_ge'), dateBound('end_date_lt'), granularity, currency],
+  },
+  {
+    id: 'analytics-shop-skus',
+    group: 'Analytics',
+    name: { vi: 'Hiệu quả các SKU', en: 'SKU performance' },
+    method: 'GET',
+    path: '/analytics/202509/shop_skus/performance',
+    resultPath: 'data.skus',
+    idField: 'id',
+    pagination: cursor,
+    params: [shopCipher, dateBound('start_date_ge'), dateBound('end_date_lt'), pageSize(100), pageToken, currency],
+  },
+  {
+    id: 'analytics-shop-videos-overview',
+    group: 'Analytics',
+    name: { vi: 'Tổng quan hiệu quả video', en: 'Video performance overview' },
+    method: 'GET',
+    path: '/analytics/202509/shop_videos/overview_performance',
+    resultPath: 'data.performance.intervals',
+    params: [shopCipher, dateBound('start_date_ge'), dateBound('end_date_lt'), granularity, currency],
+  },
+  {
+    id: 'analytics-shop-lives',
+    group: 'Analytics',
+    name: { vi: 'Hiệu quả các phiên LIVE', en: 'LIVE session performance' },
+    method: 'GET',
+    path: '/analytics/202509/shop_lives/performance',
+    resultPath: 'data.live_stream_sessions',
+    idField: 'id',
+    pagination: cursor,
+    params: [shopCipher, dateBound('start_date_ge'), dateBound('end_date_lt'), pageSize(100), pageToken, currency],
+  },
+  {
+    id: 'analytics-shop-lives-overview',
+    group: 'Analytics',
+    name: { vi: 'Tổng quan hiệu quả LIVE', en: 'LIVE performance overview' },
+    method: 'GET',
+    path: '/analytics/202509/shop_lives/overview_performance',
+    resultPath: 'data.performance.intervals',
+    params: [shopCipher, dateBound('start_date_ge'), dateBound('end_date_lt'), granularity, currency],
+  },
+  {
+    id: 'order-detail',
+    group: 'Order',
+    name: { vi: 'Chi tiết đơn theo ID', en: 'Order detail by ids' },
+    method: 'GET',
+    path: '/order/202309/orders',
+    resultPath: 'data.orders',
+    idField: 'id',
+    params: [
+      shopCipher,
+      {
+        key: 'ids',
+        label: { vi: 'Order ID', en: 'Order IDs' },
+        in: 'query',
+        type: 'string',
+        required: true,
+        help: { vi: 'Cách nhau bằng dấu phẩy, tối đa 50.', en: 'Comma-separated, at most 50.' },
+      },
+    ],
+  },
+  {
+    id: 'cancellations-search',
+    group: 'Return & refund',
+    name: { vi: 'Tìm yêu cầu huỷ', en: 'Search cancellations' },
+    description: {
+      vi: 'Mỗi yêu cầu huỷ: order_id, cancel_type, cancel_status, cancel_reason, role (ai huỷ), cancel_line_items.',
+      en: 'Each cancellation: order_id, cancel_type, cancel_status, cancel_reason, role (who cancelled), cancel_line_items.',
+    },
+    method: 'POST',
+    path: '/return_refund/202309/cancellations/search',
+    resultPath: 'data.cancellations',
+    idField: 'cancel_id',
+    pagination: cursor,
+    params: [shopCipher, pageSize(100), pageToken, ...createdBetween()],
+  },
+  {
+    id: 'returns-search',
+    group: 'Return & refund',
+    name: { vi: 'Tìm yêu cầu trả hàng/hoàn tiền', en: 'Search returns and refunds' },
+    description: {
+      vi: 'Mỗi yêu cầu: order_id, return_type, return_status, return_reason, refund_amount, return_line_items.',
+      en: 'Each request: order_id, return_type, return_status, return_reason, refund_amount, return_line_items.',
+    },
+    method: 'POST',
+    path: '/return_refund/202309/returns/search',
+    resultPath: 'data.return_orders',
+    idField: 'return_id',
+    pagination: cursor,
+    params: [
+      shopCipher,
+      pageSize(100),
+      pageToken,
+      {
+        key: 'sort_field',
+        label: { vi: 'Sắp xếp theo', en: 'Sort field' },
+        in: 'query',
+        type: 'enum',
+        defaultValue: 'create_time',
+        options: [
+          { value: 'create_time', label: 'create_time' },
+          { value: 'update_time', label: 'update_time' },
+        ],
+      },
+      {
+        key: 'sort_order',
+        label: { vi: 'Thứ tự', en: 'Sort order' },
+        in: 'query',
+        type: 'enum',
+        defaultValue: 'DESC',
+        options: [
+          { value: 'DESC', label: 'DESC' },
+          { value: 'ASC', label: 'ASC' },
+        ],
+      },
+      ...createdBetween(),
+      // The refund figure asks for the requests changed since it last asked (analytics/data/tiktok-shop.ts).
+      unixTime('update_time_ge', 'Cập nhật từ', 'Updated from'),
+      unixTime('update_time_lt', 'Cập nhật trước', 'Updated before'),
+    ],
+  },
+  {
+    id: 'return-records',
+    group: 'Return & refund',
+    name: { vi: 'Lịch sử một yêu cầu trả hàng', en: 'Return records' },
+    method: 'GET',
+    path: '/return_refund/202309/returns/{return_id}/records',
+    resultPath: 'data.records',
+    params: [shopCipher, pathId('return_id', 'Return ID')],
+  },
+  {
+    id: 'aftersale-eligibility',
+    group: 'Return & refund',
+    name: { vi: 'Điều kiện hậu mãi của đơn', en: 'Aftersale eligibility' },
+    method: 'GET',
+    path: '/return_refund/202309/orders/{order_id}/aftersale_eligibility',
+    resultPath: 'data.sku_eligibility',
+    params: [shopCipher, pathId('order_id', 'Order ID')],
+  },
+  {
+    id: 'finance-statements',
+    group: 'Finance',
+    name: { vi: 'Sao kê', en: 'Statements' },
+    description: {
+      vi: 'Mỗi kỳ quyết toán: doanh thu, phí, phí ship, điều chỉnh, số tiền quyết toán và trạng thái chi trả.',
+      en: 'Each settlement: revenue, fees, shipping, adjustments, the settled amount and the payout status.',
+    },
+    method: 'GET',
+    path: '/finance/202309/statements',
+    resultPath: 'data.statements',
+    idField: 'id',
+    pagination: cursor,
+    params: [
+      shopCipher,
+      sortField(['statement_time'], true),
+      pageSize(100),
+      pageToken,
+      unixTime('statement_time_ge', 'Sao kê từ', 'Statements from', 'query'),
+      unixTime('statement_time_lt', 'Sao kê trước', 'Statements before', 'query'),
+    ],
+  },
+  {
+    id: 'finance-statement-transactions',
+    group: 'Finance',
+    name: { vi: 'Giao dịch của một sao kê', en: 'Transactions of a statement' },
+    description: {
+      vi: 'Từng đơn trong kỳ: doanh thu gộp, giảm giá của shop/TikTok, hoa hồng nền tảng, hoa hồng affiliate, phí ship, số tiền quyết toán.',
+      en: 'Each order in the statement: gross sales, shop/TikTok discounts, platform commission, affiliate commission, shipping, settlement.',
+    },
+    method: 'GET',
+    path: '/finance/202309/statements/{statement_id}/statement_transactions',
+    resultPath: 'data.statement_transactions',
+    idField: 'id',
+    pagination: cursor,
+    params: [shopCipher, pathId('statement_id', 'Statement ID'), sortField(['order_create_time'], true), pageSize(100), pageToken],
+  },
+  {
+    id: 'finance-order-transactions',
+    group: 'Finance',
+    name: { vi: 'Giao dịch quyết toán của một đơn', en: 'Settlement transactions of an order' },
+    method: 'GET',
+    path: '/finance/202309/orders/{order_id}/statement_transactions',
+    resultPath: 'data.statement_transactions',
+    params: [shopCipher, pathId('order_id', 'Order ID')],
+  },
+  {
+    id: 'finance-payments',
+    group: 'Finance',
+    name: { vi: 'Thanh toán về tài khoản', en: 'Payments' },
+    method: 'GET',
+    path: '/finance/202309/payments',
+    resultPath: 'data.payments',
+    idField: 'id',
+    pagination: cursor,
+    params: [shopCipher, sortField(['create_time'], true), pageSize(100), pageToken, ...createdBetween('query')],
+  },
+  {
+    id: 'finance-withdrawals',
+    group: 'Finance',
+    name: { vi: 'Rút tiền', en: 'Withdrawals' },
+    method: 'GET',
+    path: '/finance/202309/withdrawals',
+    resultPath: 'data.withdrawals',
+    idField: 'id',
+    pagination: cursor,
+    params: [
+      shopCipher,
+      {
+        key: 'types',
+        label: { vi: 'Loại', en: 'Types' },
+        in: 'query',
+        type: 'enum',
+        required: true,
+        defaultValue: 'WITHDRAW',
+        options: ['WITHDRAW', 'SETTLE', 'TRANSFER', 'REVERSE'].map((value) => ({ value, label: value })),
+      },
+      pageSize(100),
+      pageToken,
+      ...createdBetween('query'),
+    ],
+  },
+  {
+    id: 'packages-search',
+    group: 'Fulfillment',
+    name: { vi: 'Tìm kiện hàng', en: 'Search packages' },
+    method: 'POST',
+    path: '/fulfillment/202309/packages/search',
+    resultPath: 'data.packages',
+    idField: 'id',
+    pagination: cursor,
+    params: [shopCipher, pageSize(50), pageToken, ...createdBetween()],
+  },
+  {
+    id: 'order-tracking',
+    group: 'Fulfillment',
+    name: { vi: 'Hành trình vận chuyển của đơn', en: 'Order tracking' },
+    method: 'GET',
+    path: '/fulfillment/202309/orders/{order_id}/tracking',
+    params: [shopCipher, pathId('order_id', 'Order ID')],
+  },
+  {
+    id: 'warehouses',
+    group: 'Logistics',
+    name: { vi: 'Kho hàng', en: 'Warehouses' },
+    method: 'GET',
+    path: '/logistics/202309/warehouses',
+    resultPath: 'data.warehouses',
+    idField: 'id',
+    params: [shopCipher],
+  },
+  {
+    id: 'inventory-search',
+    group: 'Product',
+    name: { vi: 'Tồn kho theo sản phẩm/SKU', en: 'Inventory by product/SKU' },
+    method: 'POST',
+    path: '/product/202309/inventory/search',
+    resultPath: 'data.inventory',
+    idField: 'product_id',
+    params: [
+      shopCipher,
+      { key: 'product_ids', label: { vi: 'Product ID', en: 'Product IDs' }, in: 'body', type: 'string[]', help: { vi: 'Tối đa 100.', en: 'At most 100.' } },
+      { key: 'sku_ids', label: { vi: 'SKU ID', en: 'SKU IDs' }, in: 'body', type: 'string[]', help: { vi: 'Tối đa 600.', en: 'At most 600.' } },
+    ],
+  },
+  {
+    id: 'categories',
+    group: 'Product',
+    name: { vi: 'Danh mục ngành hàng', en: 'Categories' },
+    method: 'GET',
+    path: '/product/202309/categories',
+    resultPath: 'data.categories',
+    idField: 'id',
+    params: [shopCipher],
+  },
+  {
+    id: 'brands',
+    group: 'Product',
+    name: { vi: 'Thương hiệu', en: 'Brands' },
+    method: 'GET',
+    path: '/product/202309/brands',
+    resultPath: 'data.brands',
+    idField: 'id',
+    pagination: cursor,
+    params: [shopCipher, pageSize(100), pageToken],
+  },
+  {
+    id: 'promotion-activities-search',
+    group: 'Promotion',
+    name: { vi: 'Tìm chương trình khuyến mãi', en: 'Search promotion activities' },
+    method: 'POST',
+    path: '/promotion/202309/activities/search',
+    resultPath: 'data.activities',
+    idField: 'id',
+    params: [
+      shopCipher,
+      { key: 'page_size', label: { vi: 'Số dòng/trang', en: 'Page size' }, in: 'body', type: 'number', defaultValue: 50, help: { vi: 'Tối đa 100.', en: 'At most 100.' } },
+      { key: 'page_token', label: { vi: 'Page token', en: 'Page token' }, in: 'body', type: 'string' },
+    ],
+  },
+  {
+    id: 'coupons-search',
+    group: 'Promotion',
+    name: { vi: 'Tìm voucher', en: 'Search coupons' },
+    method: 'POST',
+    path: '/promotion/202406/coupons/search',
+    resultPath: 'data.coupons',
+    idField: 'id',
+    pagination: cursor,
+    params: [shopCipher, pageSize(100), pageToken],
+  },
+  {
+    id: 'creator-content-details',
+    group: 'Affiliate',
+    name: { vi: 'Creator đang quảng bá một sản phẩm', en: 'Creators promoting a product' },
+    description: {
+      vi: 'Mỗi creator: hồ sơ, số video và live cho sản phẩm.',
+      en: 'Per creator: profile, and their video and live counts for the product.',
+    },
+    method: 'GET',
+    path: '/affiliate_seller/202412/open_collaborations/creator_content_details',
+    docsUrl: `${DOCS}/677ce46cb48292030701df1e`,
+    resultPath: 'data.creator_content_details',
+    params: [shopCipher, { key: 'product_id', label: { vi: 'Product ID', en: 'Product ID' }, in: 'query', type: 'string', required: true }, pageSize(100, 20), pageToken],
+  },
+]

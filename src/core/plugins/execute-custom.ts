@@ -3,8 +3,8 @@ import 'server-only'
 import { and, eq } from 'drizzle-orm'
 import { db } from '@/core/db/client'
 import { apiCallLogs, connections } from '@/core/db/schema/connections'
-import { decryptJson } from '@/core/crypto/secrets'
 import { createId } from '@/core/utils/id'
+import { freshContext } from './fresh-credentials'
 import { buildQueryString, readPath, sendRequest } from './http'
 import { buildRequestEcho, secretValuesOf, type RequestEcho } from './redact'
 import { requirePlugin } from './registry'
@@ -83,12 +83,7 @@ export async function executeCustomRequest(
 
   const plugin = requirePlugin(connection.pluginId)
 
-  const context: ConnectionContext = {
-    credentials: connection.credentials ? decryptJson(connection.credentials) : {},
-    metadata: connection.metadata ?? {},
-    connectionId: connection.id,
-    projectId: connection.projectId,
-  }
+  const context: ConnectionContext = await freshContext(connection)
 
   let baseUrl: string
   try {
@@ -115,11 +110,19 @@ export async function executeCustomRequest(
     ? plugin.customHeaders(context)
     : { 'Content-Type': 'application/json' }
 
-  const prepared = {
+  const unsigned = {
     url: `${resolved.url}${buildQueryString(query)}`,
     method,
     headers,
     body,
+  }
+  // A connector that signs each request (over its path, query and body) signs this one too.
+  const prepared = (await plugin.prepareCustomRequest?.(unsigned, context)) ?? unsigned
+  // The checked boundary holds whatever the connector did: same origin, same path.
+  const before = new URL(unsigned.url)
+  const after = new URL(prepared.url)
+  if (after.origin !== before.origin || after.pathname !== before.pathname) {
+    throw new CustomRequestError('PATH_ESCAPES-BASE')
   }
 
   const result = await sendRequest(prepared)

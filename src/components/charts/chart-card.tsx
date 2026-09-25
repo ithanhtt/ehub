@@ -14,6 +14,7 @@ import TableRow from '@mui/material/TableRow'
 import TableSortLabel from '@mui/material/TableSortLabel'
 import Tooltip from '@mui/material/Tooltip'
 import Typography from '@mui/material/Typography'
+import { capitalizeFirst } from '@/core/utils/format'
 import ShowChartOutlined from '@mui/icons-material/ShowChartOutlined'
 import TableRowsOutlined from '@mui/icons-material/TableRowsOutlined'
 import { TableScroll } from '@/components/ui/table-scroll'
@@ -140,7 +141,7 @@ export function ChartCard({
           )}
           {subtitle ? (
             <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block' }}>
-              {subtitle}
+              {capitalizeFirst(subtitle)}
             </Typography>
           ) : null}
         </Box>
@@ -214,7 +215,7 @@ export function ChartCard({
  * order itself is held by the card (see ChartCard). The headings stay pinned
  * as the rows scroll, looking as the product tables' do (see TableScroll).
  */
-function SortableTable({
+export function SortableTable({
   table,
   sort: chosen,
   onSortChange,

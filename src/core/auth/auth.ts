@@ -65,6 +65,17 @@ export const auth = betterAuth({
     accountLinking: { enabled: true },
   },
 
+  /*
+   * Where the client's address is, for better-auth's own rate limit. Behind
+   * Cloudflare and nginx, X-Forwarded-For holds two addresses (the client's
+   * and Cloudflare's), which better-auth will not choose between — and falls
+   * back to one bucket shared by every user. CF-Connecting-IP is the client
+   * alone, set by Cloudflare; the others serve a server reached directly.
+   */
+  advanced: {
+    ipAddress: { ipAddressHeaders: ['cf-connecting-ip', 'x-forwarded-for', 'x-real-ip'] },
+  },
+
   databaseHooks: {
     user: {
       create: {

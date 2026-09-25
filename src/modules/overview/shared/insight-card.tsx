@@ -10,6 +10,7 @@ import DialogTitle from '@mui/material/DialogTitle'
 import IconButton from '@mui/material/IconButton'
 import Stack from '@mui/material/Stack'
 import Typography from '@mui/material/Typography'
+import { capitalizeFirst } from '@/core/utils/format'
 import useMediaQuery from '@mui/material/useMediaQuery'
 import { useTheme } from '@mui/material/styles'
 import CloseOutlined from '@mui/icons-material/CloseOutlined'
@@ -54,7 +55,7 @@ export function InsightCard({
             </Stack>
             {subtitle ? (
               <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block' }}>
-                {subtitle}
+                {capitalizeFirst(subtitle)}
               </Typography>
             ) : null}
           </Box>
@@ -138,9 +139,12 @@ export function ExpandableChartCard({
   sort,
   onSortChange,
   render,
+  action,
 }: {
   title: string
   subtitle?: string
+  /** A small control beside the table toggle (a product picker), in the card and in the dialog. */
+  action?: React.ReactNode
   labels: { chart: string; table: string }
   table?: TableView
   expandLabel: string
@@ -177,12 +181,13 @@ export function ExpandableChartCard({
         table={table}
         expand={{ label: expandLabel, onClick: () => setOpen(true) }}
         badge={badge}
+        action={action}
         {...shared}
       >
         {render(false)}
       </ChartCard>
       <DetailsDialog open={open} onClose={() => setOpen(false)} title={title} closeLabel={closeLabel}>
-        <ChartCard bare title={title} subtitle={subtitle} labels={labels} table={table} badge={badge} {...shared}>
+        <ChartCard bare title={title} subtitle={subtitle} labels={labels} table={table} badge={badge} action={action} {...shared}>
           {render(true)}
         </ChartCard>
       </DetailsDialog>

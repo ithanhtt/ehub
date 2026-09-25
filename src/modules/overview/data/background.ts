@@ -1,5 +1,6 @@
 import 'server-only'
 
+import { reasonOf, warnThrottled } from '@/core/utils/log'
 import { dashboardSapoContexts } from './overview'
 import { syncSapoInBackground } from './sapo'
 
@@ -40,11 +41,14 @@ export function backgroundSyncEnabled(): boolean {
 }
 
 async function round(runner: Runner) {
+  // The reports' TikTok Shop days are kept warm the same way, without holding up the Sapo round.
+  void warmReports(runner)
+
   let contexts
   try {
     contexts = await dashboardSapoContexts()
   } catch (error) {
-    console.warn('[sync] Sapo connections unavailable:', error instanceof Error ? error.message : error)
+    warnThrottled('[sync] Sapo connections unavailable', `[sync] Sapo connections unavailable: ${reasonOf(error)}`)
     return
   }
   await Promise.all(
@@ -54,12 +58,54 @@ async function round(runner: Runner) {
       try {
         await syncSapoInBackground(context)
       } catch (error) {
-        console.warn(`[sync] Sapo ${context.connectionId}:`, error instanceof Error ? error.message : error)
+        warnThrottled(`[sync] Sapo:${context.connectionId}`, `[sync] Sapo ${context.connectionId}: ${reasonOf(error)}`)
       } finally {
         runner.busy.delete(context.connectionId)
       }
     }),
   )
+}
+
+/** Rounds between TikTok Shop warm-ups: its days fill in behind a queue, so every ten minutes is plenty. */
+const REPORT_EVERY_ROUNDS = 10
+let reportRound = 0
+
+/**
+ * Queues the recent days the reports and the overview read — each TikTok Ads
+ * connection's GMV Max days, each TikTok Shop connection's order days (see
+ * analytics/data/tiktok-shop.ts) — one connection's failure never stopping the next.
+ */
+async function warmReports(runner: Runner) {
+  if (reportRound++ % REPORT_EVERY_ROUNDS !== 0) return
+  try {
+    const [{ connectedContexts }, { warmTiktokShop }, { fileTodayTargets }, { warmGmvMaxDays }] = await Promise.all([
+      import('@/modules/analytics/data/connections'),
+      import('@/modules/analytics/data/tiktok-shop'),
+      import('@/modules/analytics/data/gmv-max'),
+      import('./gmv-max'),
+    ])
+    for (const context of await connectedContexts('tiktok-ads')) {
+      // The overview's GMV Max days (overview/data/gmv-max.ts): queued, not waited for — they fill in behind,
+      // at background priority, so the dashboard opens on days already kept.
+      await warmGmvMaxDays(context).catch((error) =>
+        warnThrottled(`[sync] GMV Max days:${context.connectionId}`, `[sync] GMV Max days ${context.connectionId}: ${reasonOf(error)}`),
+      )
+      // TikTok keeps no history of ROI targets: each round files today's (see analytics/data/gmv-max.ts).
+      await fileTodayTargets(context).catch((error) =>
+        warnThrottled(`[sync] GMV Max targets:${context.connectionId}`, `[sync] GMV Max targets ${context.connectionId}: ${reasonOf(error)}`),
+      )
+    }
+    for (const context of await connectedContexts('tiktok-shop')) {
+      const key = `tts:${context.connectionId}`
+      if (runner.busy.has(key)) continue
+      runner.busy.add(key)
+      await warmTiktokShop(context)
+        .catch((error) => warnThrottled(`[sync] TikTok Shop:${context.connectionId}`, `[sync] TikTok Shop ${context.connectionId}: ${reasonOf(error)}`))
+        .finally(() => runner.busy.delete(key))
+    }
+  } catch (error) {
+    warnThrottled('[sync] TikTok Shop connections unavailable', `[sync] TikTok Shop connections unavailable: ${reasonOf(error)}`)
+  }
 }
 
 export function startBackgroundSync() {

@@ -1,6 +1,7 @@
 import 'server-only'
 
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { mkdir } from 'node:fs/promises'
+import { writeFileAtomic, readJsonFile } from '@/core/utils/atomic-write'
 import path from 'node:path'
 import { sendRequest } from '@/core/plugins/http'
 import { requirePlugin } from '@/core/plugins/registry'
@@ -8,6 +9,37 @@ import type { ConnectionContext } from '@/core/plugins/types'
 import { memo } from './cache'
 import { OTHER_CHANNEL } from './channels'
 import { daysBetween, shiftDay, vnDate, type Period } from './period'
+import {
+  changesKeptDay,
+  channelOf as channelOfOrder,
+  currentFailure,
+  emptyTally,
+  factsOf,
+  foldDay,
+  keepNewer,
+  markRecheck,
+  mayRetry,
+  newestModified,
+  newRechecks,
+  nextCursor,
+  placedAt,
+  readWhole,
+  recordFailure,
+  refundsOf,
+  settleRecheck,
+  signaturesOf,
+  takeRecheck,
+  vnDay,
+  vnHour,
+  type DayFailure,
+  type HourTally,
+  type Order,
+  type OrderFacts,
+  type ProductDay,
+  type Rechecks,
+  type RefundTally,
+  type Tally,
+} from './sapo-orders'
 import { selectionOf } from './selection'
 import type {
   DashboardRange,
@@ -51,13 +83,18 @@ import type {
  * Everything is summed order by order: the admin API has no totals endpoint,
  * ignores `fields`, and a page of 250 orders weighs about 2 MB (measured).
  * This store takes 700–1,700 orders a day, so re-reading whole days on every
- * refresh is out of the question. Today is read whole once and every ten
- * minutes (which is what picks up cancellations for the cancelled count);
- * the ledger adds new orders in between. Earlier days are summed once and
- * kept in .data/cache; yesterday is re-read every half hour, anything three
- * or more days old never (its orders no longer change: cancellations land
- * within 1.4 days, and later returns are the ledger's). Missing days are
- * filled in behind the response, most recent first.
+ * refresh is out of the question. Today is read whole once, and kept order by
+ * order after that: what each of its orders adds (its facts, sapo-orders.ts)
+ * is held in memory, and an order the ledger sees modified — new, cancelled,
+ * its total or lines edited — replaces its own facts, once, so today stays
+ * what a full read would give. A full read every half hour (an hour when no
+ * one watches) remains, as a safety net. Earlier days are summed once and
+ * kept in .data/cache; yesterday is re-read every half hour, two days ago
+ * every six hours, anything older only when the ledger sees one of its orders
+ * change what it counts (cancellations land within 1.4 days, and later
+ * returns are the ledger's). Missing days are filled in behind the response,
+ * most recent first; a day that fails waits ten minutes or so before the next
+ * try.
  *
  * Each day is split by `source_name` (TikTok Shop, Shopee, …) so the
  * dashboard can count only the channels a project chose, without fetching
@@ -88,17 +125,44 @@ const KEEP_DAYS = 275 + RETURN_WINDOW_DAYS
 const CACHE_VERSION = 4
 /**
  * What a day's product figures hold: 2 adds each product's cancelled orders and
- * value. A day kept with older ones keeps its totals; its products are read
- * again when a view needs them.
+ * value; 3 their SKUs and their orders and cancellations by hour (for the
+ * order and cancellation report); 4 the value of each product's hours (the
+ * overview's products by hour, in sales). A day kept with older ones keeps its
+ * totals; its products are read again when a view needs them — from version 3,
+ * which has everything but the hours' value, meanwhile still served
+ * (PRODUCTS_SERVED), and read again behind.
  */
-const PRODUCTS_VERSION = 2
+const PRODUCTS_VERSION = 4
+/** The oldest product figures still served while a newer read is on its way. */
+const PRODUCTS_SERVED = 3
 
 /** How often the ledger reads what changed. The page polls every 15 s. */
 const LIVE_MS = 10_000
-/** How often today is read whole, to catch cancellations of earlier orders. */
-const FULL_MS = 10 * 60_000
+/**
+ * How often today is read whole. The ledger keeps it current order by order in
+ * between (cancellations and edits included); this read is the safety net
+ * that would put right anything it missed.
+ */
+const FULL_MS = 30 * 60_000
 /** …and when nobody has the dashboard open: the background keeps it close, without reading 2 MB pages for no one. */
-const IDLE_FULL_MS = 30 * 60_000
+const IDLE_FULL_MS = 60 * 60_000
+/** After a failed read of today, the next waits this long — the page asks every few seconds while it syncs. */
+const TODAY_RETRY_MS = 60_000
+/**
+ * How long a dashboard request waits on Sapo: for the first read of today, and
+ * the ledger's few seconds. Past it the response goes out with what is there,
+ * the missing figures marked as still syncing (the page asks again every few
+ * seconds until they land), rather than hanging on a 14 MB read.
+ */
+const RESPONSE_BUDGET_MS = 10_000
+/**
+ * The earlier days whose orders' fingerprints are kept in memory once read,
+ * so a later change to one of their orders can be told from a delivery update
+ * (see changesKeptDay). About 1,700 small numbers a day.
+ */
+const SIGN_DAYS = 14
+/** A store's figures no one has asked for in this long are dropped from memory (the file keeps them). */
+const IDLE_STATE_MS = 3600_000
 /** A dashboard read within this long counts as someone watching. */
 const WATCHED_MS = 5 * 60_000
 /**
@@ -141,49 +205,7 @@ const DAY_WORKERS = 3
 /** While days are filled in, the cache file is written at most this often — and once they are all in. */
 const BACKFILL_PERSIST_MS = 15_000
 
-type Order = Record<string, unknown>
-
-/**
- * One hour's orders placed: [orders, cancelled, gmv, cancelled value, lines,
- * VAT, shipping] — see Tally.
- */
-type HourTally = [number, number, number, number, number, number, number]
-
-type Tally = {
-  /** Orders placed, cancelled ones included. */
-  created: number
-  /** Of those, the ones cancelled. */
-  cancelled: number
-  /** Value of every order placed (`total_price`: after discounts, VAT and shipping in), cancelled ones included. */
-  gmv: number
-  cancelledValue: number
-  /** Their lines at list price, VAT taken out — Sapo's Tiền hàng (see linesOf). */
-  lines: number
-  /** The VAT inside `gmv`. */
-  tax: number
-  shipping: number
-  /** The same for each hour of the day, Vietnam time, by the hour placed. */
-  hours: HourTally[]
-}
-
-/** Refunds: [how many, amount with VAT, the VAT in it]. */
-type RefundTally = [number, number, number]
-
-/** One product's orders on one day, in one channel. */
-type ProductDay = {
-  name: string
-  /** Orders containing it (an order with two lines of it counts once), and the units in them. */
-  orders: number
-  quantity: number
-  /** Of those orders, the ones cancelled. Missing, like the values below, on days read before products version 2. */
-  cancelled?: number
-  /** Its lines' value after discounts (see `lineValue`), cancelled orders included — as the day's GMV counts them. */
-  gmv?: number
-  /** The part of `gmv` in cancelled orders. */
-  cancelledGmv?: number
-  /** Time of its latest order, epoch ms. */
-  last: number
-}
+// Tally, HourTally, RefundTally and ProductDay — what a day keeps — are defined with the arithmetic, in sapo-orders.ts.
 
 type DayStats = {
   sources: Record<string, Tally>
@@ -209,22 +231,41 @@ type DayStats = {
 type Ledger = {
   /** The first day the ledger holds whole, Vietnam time. */
   since: string
-  /** Orders modified up to here have been read, epoch ms (this server's clock, less OVERLAP_MS when read). */
+  /**
+   * Orders modified up to here have been read, epoch ms — by Sapo's clock: the
+   * latest `modified_on` seen (see nextCursor), so a server clock off from
+   * Sapo's cannot make a read start after changes it missed. Files from before
+   * held this server's clock at the read's start; either way the next read
+   * starts OVERLAP_MS before it.
+   */
   cursor: number
+  /**
+   * When the last read of what changed began that came back whole, epoch ms,
+   * this server's clock: how current the ledger is. The cursor cannot say — it
+   * stands still while nothing changes, all night. Missing in files from
+   * before it was kept; the cursor stands in (it was the same clock then).
+   */
+  readAt?: number
   /** Per day made, per channel, per hour (Vietnam time). */
   days: Record<string, Record<string, RefundTally[]>>
   /** The refunds counted in the last RECENT_MS, id → time made. */
   recent: Record<string, number>
 }
 
-/** In memory only: which of today's orders are counted, so the ledger adds each new one exactly once. */
+/**
+ * In memory only: what each of the live day's orders adds to it, by id — so the
+ * ledger replaces an order's part (new, cancelled, edited) exactly once and the
+ * day, folded again, is what a full read would give.
+ */
 type Live = {
   day: string
-  ids: Set<unknown>
+  orders: Map<string, OrderFacts>
   at: number
   /** When today was last read whole, and when that read started. */
   fullAt: number
   readFrom: number
+  /** The ledger's cursor when that read started: the next ledger read goes back to it (see refreshToday). */
+  fromCursor: number
 }
 
 type State = {
@@ -237,9 +278,27 @@ type State = {
   reading: Set<string>
   /** Workers filling in the queue. */
   workers: number
-  lastError: string | null
-  /** Why the last read of today failed, when it did. */
+  /** Days whose last read failed, each with its error: a failed day waits before it is tried again (see mayRetry). */
+  failed: Map<string, DayFailure>
+  /** Why the last read of today failed, when it did, and when. */
   todayError: string | null
+  todayFailedAt: number
+  /** When the read of today under way began; 0 when none is. */
+  todayReadSince: number
+  /** Earlier days a change to one of their orders was seen on, to be read again (see takeRecheck). */
+  rechecks: Rechecks
+  /** The fingerprints of the orders of the earlier days read in this run (the last SIGN_DAYS), by day. */
+  signatures: Map<string, Map<string, number>>
+  /** Whether Sapo's order count can be checked a day's read against (see readDay); off once it proved not comparable. */
+  countTrusted: boolean
+  /**
+   * The refunds on the kept days' orders, by the day made, for the days before
+   * the ledger — gathered once instead of scanning every kept day for every
+   * day asked. Dropped whenever a day before the ledger changes.
+   */
+  refundIndex: Map<string, Array<[string, RefundTally]>> | null
+  /** When anything last asked for this store's figures. */
+  seenAt: number
   /** The ledger read in progress: one at a time, however long it takes. */
   sweep: Promise<void> | null
   sweptAt: number
@@ -253,8 +312,9 @@ type State = {
   viewedAt: number
 }
 
-// A new key, so a hot reload does not hand this code an older in-memory shape.
-const states = ((globalThis as unknown as { __adshubSapoDaysV8?: Map<string, State> }).__adshubSapoDaysV8 ??= new Map())
+// A new key, so a hot reload does not hand this code an older in-memory shape (and the older one is let go).
+delete (globalThis as unknown as { __adshubSapoDaysV8?: unknown }).__adshubSapoDaysV8
+const states = ((globalThis as unknown as { __adshubSapoDaysV9?: Map<string, State> }).__adshubSapoDaysV9 ??= new Map())
 
 /** The call budget of one store, shared by every read of it (see BUCKET_CALLS). */
 type Gate = { level: number; at: number; inFlight: number }
@@ -265,32 +325,72 @@ const SAFE_ID = /^[A-Za-z0-9_-]+$/
 const VN_OFFSET_MS = 7 * 3600_000
 const DAY_MS = 86_400_000
 
-const emptyHours = (): HourTally[] => Array.from({ length: 24 }, (): HourTally => [0, 0, 0, 0, 0, 0, 0])
 const emptyRefundHours = (): RefundTally[] => Array.from({ length: 24 }, (): RefundTally => [0, 0, 0])
-
-const emptyTally = (): Tally => ({
-  created: 0,
-  cancelled: 0,
-  gmv: 0,
-  cancelledValue: 0,
-  lines: 0,
-  tax: 0,
-  shipping: 0,
-  hours: emptyHours(),
-})
 
 /** A ledger starting on the day before today. */
 const newLedger = (): Ledger => {
   const since = shiftDay(vnDate(new Date()), -1)
-  return { since, cursor: Date.parse(`${since}T00:00:00+07:00`), days: {}, recent: {} }
+  const start = Date.parse(`${since}T00:00:00+07:00`)
+  return { since, cursor: start, readAt: start, days: {}, recent: {} }
 }
 
-/** The day's products are kept, with every figure the current version has. */
-const hasProducts = (stats: DayStats | undefined) => !!stats?.products && stats.productsVersion === PRODUCTS_VERSION
+/** How current the ledger is, by this server's clock (see Ledger.readAt). */
+const ledgerReadAt = (ledger: Ledger) => ledger.readAt ?? ledger.cursor
+
+/**
+ * Puts a day's figures in place. Every change to `days` goes through here, so
+ * the refunds gathered for the days before the ledger are gathered again when
+ * one of the days they come from changes.
+ */
+function setDay(state: State, day: string, stats: DayStats) {
+  state.days[day] = stats
+  // Any day, not only those before the ledger: gathering again is a few thousand cells, and never wrong.
+  state.refundIndex = null
+}
+
+/** A day's figures from its orders' facts, as kept. */
+const statsOf = (orders: Map<string, OrderFacts>, day: string, computedAt: number): DayStats => ({
+  ...foldDay(orders.values()),
+  productsVersion: PRODUCTS_VERSION,
+  computedAt,
+  final: day <= shiftDay(vnDate(new Date()), -3),
+})
+
+/** Keeps the fingerprints of an earlier day's orders while the day is recent enough to be worth it (SIGN_DAYS). */
+function keepSignatures(state: State, day: string, orders: Map<string, OrderFacts>) {
+  const oldest = shiftDay(vnDate(new Date()), -SIGN_DAYS)
+  if (day >= oldest) state.signatures.set(day, signaturesOf(orders.values()))
+  for (const kept of state.signatures.keys()) if (kept < oldest) state.signatures.delete(kept)
+}
+
+/**
+ * Lets go of the stores nothing has asked about for IDLE_STATE_MS — a
+ * connection removed, or a project no longer opened — once nothing of theirs
+ * is running, their last changes written first. Their file stays: coming back
+ * reads it again.
+ */
+let forgotAt = 0
+function forgetIdle(keep: string) {
+  const now = Date.now()
+  if (now - forgotAt < 5 * 60_000) return
+  forgotAt = now
+  for (const [connectionId, state] of states) {
+    if (connectionId === keep || now - state.seenAt < IDLE_STATE_MS) continue
+    if (state.sweep || state.workers > 0 || state.reading.size > 0 || state.writing || state.todayReadSince) continue
+    states.delete(connectionId)
+    const gate = gates.get(connectionId)
+    if (gate && gate.inFlight === 0) gates.delete(connectionId)
+    if (state.dirty || state.persistedAt < state.seenAt) void persist(connectionId, state).catch(() => {})
+  }
+}
+
+/** The day's products are kept, with the figures served (a version-3 day lacks only its hours' value). */
+const hasProducts = (stats: DayStats | undefined) => !!stats?.products && (stats.productsVersion ?? 0) >= PRODUCTS_SERVED
+/** …and with every figure the current version has: its products' hours in value too. */
+const hasHourValues = (stats: DayStats | undefined) => !!stats?.products && stats.productsVersion === PRODUCTS_VERSION
 
 /** An instant as Sapo's bounds accept it: local Vietnam time with its offset. */
 const vnIso = (ms: number) => `${new Date(ms + VN_OFFSET_MS).toISOString().slice(0, 19)}+07:00`
-const vnHour = (ms: number) => new Date(ms + VN_OFFSET_MS).getUTCHours()
 
 function fileFor(connectionId: string): string {
   // Our own generated ids; checked anyway, since they become a file name.
@@ -299,6 +399,7 @@ function fileFor(connectionId: string): string {
 }
 
 async function stateFor(connectionId: string): Promise<State> {
+  forgetIdle(connectionId)
   let state = states.get(connectionId)
   if (!state) {
     state = {
@@ -309,8 +410,15 @@ async function stateFor(connectionId: string): Promise<State> {
       queue: new Set(),
       reading: new Set(),
       workers: 0,
-      lastError: null,
+      failed: new Map(),
       todayError: null,
+      todayFailedAt: 0,
+      todayReadSince: 0,
+      rechecks: newRechecks(),
+      signatures: new Map(),
+      countTrusted: true,
+      refundIndex: null,
+      seenAt: Date.now(),
       sweep: null,
       sweptAt: 0,
       sweepError: null,
@@ -321,16 +429,19 @@ async function stateFor(connectionId: string): Promise<State> {
     }
     states.set(connectionId, state)
   }
+  state.seenAt = Date.now()
   const current = state
-  current.loaded ??= readFile(fileFor(connectionId), 'utf8')
-    .then((text) => {
-      const parsed = JSON.parse(text) as { version?: number; days?: Record<string, DayStats>; ledger?: Ledger }
+  current.loaded ??= readJsonFile<{ version?: number; days?: Record<string, DayStats>; ledger?: Ledger }>(fileFor(connectionId))
+    .then((parsed) => {
+      if (!parsed) return
       // The days and the ledger are one: a day's refunds before the ledger are
       // whole only when the ledger has run since the day was read, so a day
       // never outlives its ledger.
       if (parsed.version === CACHE_VERSION && parsed.days && typeof parsed.days === 'object' && parsed.ledger?.since) {
         current.days = { ...parsed.days, ...current.days }
-        current.ledger = parsed.ledger
+        // A file from before `readAt` was kept: its cursor was this server's clock, which is what readAt is.
+        current.ledger = { ...parsed.ledger, readAt: parsed.ledger.readAt ?? parsed.ledger.cursor }
+        current.refundIndex = null
       }
     })
     .catch(() => {
@@ -342,15 +453,19 @@ async function stateFor(connectionId: string): Promise<State> {
 
 async function writeState(connectionId: string, state: State) {
   const oldest = shiftDay(vnDate(new Date()), -KEEP_DAYS)
-  for (const day of Object.keys(state.days)) if (day < oldest) delete state.days[day]
+  for (const day of Object.keys(state.days)) {
+    if (day >= oldest) continue
+    delete state.days[day]
+    state.refundIndex = null
+  }
   for (const day of Object.keys(state.ledger.days)) if (day < oldest) delete state.ledger.days[day]
+  for (const day of state.failed.keys()) if (day < oldest) state.failed.delete(day)
+  for (const day of state.rechecks.marks.keys()) if (day < oldest) state.rechecks.marks.delete(day)
 
   await mkdir(CACHE_DIR, { recursive: true })
   const file = fileFor(connectionId)
-  const temp = `${file}.tmp`
   state.persistedAt = Date.now()
-  await writeFile(temp, JSON.stringify({ version: CACHE_VERSION, days: state.days, ledger: state.ledger }), 'utf8')
-  await rename(temp, file)
+  await writeFileAtomic(file, JSON.stringify({ version: CACHE_VERSION, days: state.days, ledger: state.ledger }))
 }
 
 /**
@@ -414,16 +529,32 @@ async function enter(connectionId: string): Promise<Gate> {
   }
 }
 
-/** One GET to the store's admin API, within its budget. */
+/** Attempts at one call; each goes back through the gate, so a retry is counted in the bucket like any call. */
+const SAPO_ATTEMPTS = 3
+const SAPO_RETRYABLE = new Set([0, 408, 425, 429, 500, 502, 503, 504])
+
+/**
+ * One GET to the store's admin API, within its budget. Retried here rather
+ * than inside sendRequest: a retry there would slip past the bucket, and
+ * after a 429 the bucket is taken as full — Sapo said so — whatever the count
+ * here thought.
+ */
 async function sapoGet(context: ConnectionContext, pathAndQuery: string): Promise<unknown> {
   const { base, headers } = sapoRequest(context)
-  const gate = await enter(context.connectionId)
-  try {
-    const response = await sendRequest({ url: `${base}${pathAndQuery}`, method: 'GET', headers }, { maxRetries: 3, timeoutMs: 60_000 })
-    if (!response.ok) throw new Error(`Sapo ${response.status || ''} ${response.error ?? 'request failed'}`.trim())
-    return response.data
-  } finally {
-    gate.inFlight -= 1
+  for (let attempt = 1; ; attempt++) {
+    const gate = await enter(context.connectionId)
+    let response
+    try {
+      response = await sendRequest({ url: `${base}${pathAndQuery}`, method: 'GET', headers }, { maxRetries: 0, timeoutMs: 45_000 })
+    } finally {
+      gate.inFlight -= 1
+    }
+    if (response.ok) return response.data
+    if (response.status === 429) gate.level = BUCKET_CALLS
+    if (attempt >= SAPO_ATTEMPTS || !SAPO_RETRYABLE.has(response.status)) {
+      throw new Error(`Sapo ${response.status || ''} ${response.error ?? 'request failed'}`.trim())
+    }
+    await pause(Math.min(8_000, 1_000 * 2 ** (attempt - 1) + Math.random() * 300))
   }
 }
 
@@ -460,170 +591,42 @@ async function countOrders(context: ConnectionContext, query: string): Promise<n
 const dayBounds = (day: string) =>
   `processed_on_min=${encodeURIComponent(`${day}T00:00:00+07:00`)}&processed_on_max=${encodeURIComponent(`${day}T23:59:59+07:00`)}`
 
-const channelOf = (order: Order) => (typeof order.source_name === 'string' && order.source_name ? order.source_name : OTHER_CHANNEL)
-
-/** When the revenue report files the order: `processed_on`, or its creation when that is missing. */
-function placedAt(order: Order): number {
-  const at = Date.parse(String(order.processed_on ?? order.created_on))
-  return Number.isNaN(at) ? Date.parse(String(order.created_on)) : at
-}
-
-const lineItems = (order: Order) => (Array.isArray(order.line_items) ? (order.line_items as Array<Record<string, unknown>>) : [])
+const channelOf = (order: Order) => channelOfOrder(order, OTHER_CHANNEL)
 
 /**
- * A line's value after discounts: `discounted_total`, price × quantity less
- * the discounts allocated to the line. Over an order's lines it adds up to the
- * order's total_price (measured: 133 orders out of 133), so the products' GMV
- * adds up to the day's. Gifts are lines at 0 ₫.
+ * A day's orders, each as what it adds to the day (its facts), by id. Pages are
+ * asked for by number, and an order that moves up a page between two of them
+ * would be skipped; so the read is checked against Sapo's count of the day's
+ * orders, taken just before it (orders placed meanwhile can only add), and
+ * read once more when it comes back short (see readWhole). One small call a
+ * day. Should the count turn out not to count what the list returns, it is no
+ * longer asked for.
  */
-function lineValue(line: Record<string, unknown>): number {
-  if (line.discounted_total !== undefined && line.discounted_total !== null) {
-    const total = Number(line.discounted_total)
-    if (Number.isFinite(total)) return total
-  }
-  const allocations = Array.isArray(line.discount_allocations) ? (line.discount_allocations as Array<Record<string, unknown>>) : []
-  const allocated = allocations.reduce((sum, allocation) => sum + (Number(allocation.amount) || 0), 0)
-  return (Number(line.price) || 0) * (Number(line.quantity) || 0) - allocated
-}
-
-/**
- * The order's lines at list price without VAT — the report's Tiền hàng. This
- * store's prices include VAT (`taxes_included`), and the report takes it out
- * of each line that carries some: price × quantity ÷ (1 + rate). A line with
- * none — a gift, 0 ₫ once discounted — counts at its list price. Within a few
- * đồng an hour of the report, which rounds each line its own way.
- */
-function linesOf(order: Order): number {
-  let sum = 0
-  for (const line of lineItems(order)) {
-    const value = (Number(line.price) || 0) * (Number(line.quantity) || 0)
-    const taxes = Array.isArray(line.tax_lines) ? (line.tax_lines as Array<Record<string, unknown>>) : []
-    const vat = taxes.reduce((s, tax) => s + (Number(tax.price) || 0), 0)
-    const rate = taxes.reduce((s, tax) => s + (Number(tax.rate) || 0), 0)
-    sum += order.taxes_included !== false && vat > 0 && rate > 0 ? value / (1 + rate) : value
-  }
-  return sum
-}
-
-/**
- * The order's refunds — cancellation or return, Sapo records both as one —
- * each with the time it was made and its amount with VAT and the VAT in it.
- * A refund's lines carry both (`subtotal` includes VAT when prices do).
- */
-function refundsOf(order: Order): Array<{ id: string; at: number; amount: number; tax: number }> {
-  const refunds = Array.isArray(order.refunds) ? (order.refunds as Array<Record<string, unknown>>) : []
-  const out: Array<{ id: string; at: number; amount: number; tax: number }> = []
-  for (const refund of refunds) {
-    const at = Date.parse(String(refund.created_on ?? refund.processed_at))
-    if (Number.isNaN(at)) continue
-    const lines = Array.isArray(refund.refund_line_items) ? (refund.refund_line_items as Array<Record<string, unknown>>) : []
-    const subtotal = lines.reduce((sum, line) => sum + (Number(line.subtotal) || 0), 0)
-    const tax = lines.reduce((sum, line) => sum + (Number(line.total_tax) || 0), 0)
-    out.push({ id: String(refund.id ?? `${String(order.id)}@${at}`), at, amount: order.taxes_included === false ? subtotal + tax : subtotal, tax })
-  }
-  return out
-}
-
-function addOrder(
-  day: {
-    sources: Record<string, Tally>
-    products: Record<string, Record<string, ProductDay>>
-    refunds: Record<string, Record<string, RefundTally>>
-  },
-  order: Order,
-) {
-  const channel = channelOf(order)
-  const tally = (day.sources[channel] ??= emptyTally())
-  const amount = Number(order.total_price ?? 0) || 0
-  const at = placedAt(order)
-  const hourly = tally.hours[Number.isNaN(at) ? 0 : vnHour(at)]
-  const cancelled = Boolean(order.cancelled_on || order.status === 'cancelled')
-  const lines = linesOf(order)
-  const tax = Number(order.total_tax ?? 0) || 0
-  const shipping = Number(order.total_shipping_price ?? 0) || 0
-
-  tally.created += 1
-  tally.gmv += amount
-  tally.lines += lines
-  tally.tax += tax
-  tally.shipping += shipping
-  hourly[0] += 1
-  hourly[2] += amount
-  hourly[4] += lines
-  hourly[5] += tax
-  hourly[6] += shipping
-  if (cancelled) {
-    tally.cancelled += 1
-    tally.cancelledValue += amount
-    hourly[1] += 1
-    hourly[3] += amount
-  }
-
-  // Its refunds so far, filed under the day each was made.
-  for (const refund of refundsOf(order)) {
-    const cell = ((day.refunds[vnDate(new Date(refund.at))] ??= {})[channel] ??= [0, 0, 0])
-    cell[0] += 1
-    cell[1] += refund.amount
-    cell[2] += refund.tax
-  }
-
-  // The products it held: each counted once per order, whatever its lines. Removed lines are skipped.
-  const products = (day.products[channel] ??= {})
-  const counted = new Set<string>()
-  for (const line of lineItems(order)) {
-    if (line.deleted === true) continue
-    const key = line.product_id ? String(line.product_id) : typeof line.sku === 'string' && line.sku ? `sku:${line.sku}` : null
-    if (!key) continue
-    const entry = (products[key] ??= {
-      name: String(line.title || line.name || key),
-      orders: 0,
-      quantity: 0,
-      cancelled: 0,
-      gmv: 0,
-      cancelledGmv: 0,
-      last: 0,
+async function readDay(context: ConnectionContext, state: State, day: string): Promise<Map<string, OrderFacts>> {
+  const bounds = dayBounds(day)
+  const expected = state.countTrusted ? await countOrders(context, bounds).catch(() => null) : null
+  const read = async () => {
+    const orders = new Map<string, OrderFacts>()
+    await eachPage(context, bounds, (page) => {
+      // New orders arriving mid-read can shift a page: an order is counted once, at its latest version.
+      for (const order of page) keepNewer(orders, factsOf(order, OTHER_CHANNEL))
     })
-    const value = lineValue(line)
-    entry.quantity += Number(line.quantity) || 0
-    entry.gmv = (entry.gmv ?? 0) + value
-    if (cancelled) entry.cancelledGmv = (entry.cancelledGmv ?? 0) + value
-    if (!counted.has(key)) {
-      entry.orders += 1
-      if (cancelled) entry.cancelled = (entry.cancelled ?? 0) + 1
-      counted.add(key)
-    }
-    if (at > entry.last) entry.last = at
+    return orders
   }
-}
-
-async function computeDay(context: ConnectionContext, day: string) {
-  const sources: Record<string, Tally> = {}
-  const products: Record<string, Record<string, ProductDay>> = {}
-  const refunds: Record<string, Record<string, RefundTally>> = {}
-  const ids = new Set<unknown>()
-  await eachPage(context, dayBounds(day), (orders) => {
-    for (const order of orders) {
-      // New orders arriving mid-sweep can shift a page; an id is counted once.
-      if (ids.has(order.id)) continue
-      ids.add(order.id)
-      addOrder({ sources, products, refunds }, order)
-    }
-  })
-  const stats: DayStats = {
-    sources,
-    refunds,
-    products,
-    productsVersion: PRODUCTS_VERSION,
-    computedAt: Date.now(),
-    final: day <= shiftDay(vnDate(new Date()), -3),
+  const result = await readWhole(read, expected, 2 * PAGE_SIZE)
+  if (!result.comparable) {
+    state.countTrusted = false
+    console.warn(`[sapo] ${day}: Sapo counts ${expected} orders, the read found ${result.orders.size}; reads are no longer checked against the count`)
+  } else if (result.short) {
+    console.warn(`[sapo] ${day}: Sapo counts ${expected} orders, two reads found ${result.orders.size}`)
   }
-  return { stats, ids }
+  return result.orders
 }
 
 /**
- * Reads today whole: at first, on a new day, and every ten minutes while
- * someone watches (half an hour otherwise). The ledger adds the orders placed
- * in between.
+ * Reads today whole: at first, on a new day, and every half hour while someone
+ * watches (an hour otherwise). The ledger keeps it current in between, order
+ * by order (see sweepLedger).
  */
 function refreshToday(context: ConnectionContext, state: State, today: string): Promise<void> {
   // One read at a time per connection; requests inside the window share it.
@@ -631,15 +634,43 @@ function refreshToday(context: ConnectionContext, state: State, today: string): 
     const live = state.live
     const every = Date.now() - state.viewedAt < WATCHED_MS ? FULL_MS : IDLE_FULL_MS
     if (live && live.day === today && hasProducts(state.days[today]) && Date.now() - live.fullAt <= every) return
+    // A read that has just failed is not started again for every ask of a page waiting on it.
+    if (Date.now() - state.todayFailedAt < TODAY_RETRY_MS) throw new Error(state.todayError ?? 'Sapo: reading today failed')
     const started = Date.now()
-    const { stats, ids } = await computeDay(context, today)
-    state.days[today] = stats
-    state.live = { day: today, ids, at: Date.now(), fullAt: Date.now(), readFrom: started }
-    // Orders the ledger added, while this ran, to the day it replaced may be
-    // missing from it: the next ledger read goes back to when it started (and
-    // a ledger read under way now does the same — see sweepLedger). Each order
-    // and refund is still counted once (live.ids, ledger.recent).
-    state.ledger.cursor = Math.min(state.ledger.cursor, started)
+    const fromCursor = state.ledger.cursor
+    state.todayReadSince = started
+    let orders: Map<string, OrderFacts>
+    try {
+      orders = await readDay(context, state, today)
+    } catch (error) {
+      state.todayFailedAt = Date.now()
+      throw error
+    } finally {
+      state.todayReadSince = 0
+    }
+    state.todayFailedAt = 0
+
+    const previous = state.live
+    // An order the ledger saw change after this read took it keeps the ledger's (later) version.
+    // One placed today that the read's pages had already passed (the ledger added it meanwhile) stays too:
+    // dropping it until the next ledger read would make today's count dip and come back.
+    if (previous?.day === today) {
+      for (const [id, facts] of previous.orders) {
+        if (orders.has(id)) keepNewer(orders, facts)
+        else if (Number.isFinite(facts.at) && vnDay(facts.at) === today) orders.set(id, facts)
+      }
+    }
+    // The day just ended is an earlier day now: its orders' fingerprints tell a later change to one of them.
+    if (previous && previous.day !== today) keepSignatures(state, previous.day, previous.orders)
+    const now = Date.now()
+    state.live = { day: today, orders, at: now, fullAt: now, readFrom: started, fromCursor }
+    setDay(state, today, statsOf(orders, today, now))
+    // Orders placed while this ran may be missing from it (and the ledger's
+    // additions meanwhile went to the day it replaced): the next ledger read
+    // goes back to where the ledger stood when it started — and a ledger read
+    // under way now does the same (see sweepLedger). Each order and refund is
+    // still counted once (live.orders by id, ledger.recent).
+    state.ledger.cursor = Math.min(state.ledger.cursor, fromCursor)
     await persist(context.connectionId, state)
   })
 }
@@ -649,7 +680,7 @@ function countRefunds(ledger: Ledger, order: Order) {
   for (const refund of refundsOf(order)) {
     // Older than the remembered ids: an earlier read has counted it.
     if (refund.at < ledger.cursor - RECENT_MS || ledger.recent[refund.id] !== undefined) continue
-    const day = vnDate(new Date(refund.at))
+    const day = vnDay(refund.at)
     if (day < ledger.since) continue
     ledger.recent[refund.id] = refund.at
     const cell = ((ledger.days[day] ??= {})[channelOf(order)] ??= emptyRefundHours())[vnHour(refund.at)]
@@ -660,49 +691,81 @@ function countRefunds(ledger: Ledger, order: Order) {
 }
 
 /**
- * Reads the orders modified since the ledger's mark: their refunds go into the
- * ledger, and those of today's orders not counted yet into today. Usually one
- * small page. A catch-up bigger than Sapo's result window is read in slices
- * of a week of orders placed; one placed more than SLICE_LOOKBACK_DAYS before
- * the mark is then missed — a return that late is rare and small.
+ * Reads the orders modified since the ledger's mark. Each does up to three
+ * things:
+ *
+ * - its refunds not counted yet go into the ledger, under the day made;
+ * - if it was placed on the live day (today), its facts replace the ones
+ *   counted — a new order is added, a cancelled or edited one counted anew,
+ *   exactly once — and the day is summed again from them: the same figures a
+ *   full read would give, within seconds instead of at the next one;
+ * - if it was placed on an earlier day kept on file and changes what that day
+ *   counts (see changesKeptDay), the day is marked to be read again — once
+ *   for any number of changes, and not too often (see takeRecheck). Read, not
+ *   patched: those days keep their sums, not their orders. The refunds stay
+ *   apart either way — a day's own figures are its orders placed; its refunds
+ *   are the ledger's, so reading a day again never counts one twice.
+ *
+ * Usually one small page. A catch-up bigger than Sapo's result window is read
+ * in slices of a week of orders placed; one placed more than
+ * SLICE_LOOKBACK_DAYS before the mark is then missed — a return that late is
+ * rare and small. The mark then moves to the latest `modified_on` seen: Sapo's
+ * clock, never this server's (see nextCursor).
  */
 async function sweepLedger(context: ConnectionContext, state: State) {
   const started = Date.now()
-  const modified = `modified_on_min=${encodeURIComponent(vnIso(state.ledger.cursor - OVERLAP_MS))}`
+  const from = state.ledger.cursor
+  const modified = `modified_on_min=${encodeURIComponent(vnIso(from - OVERLAP_MS))}`
   const queries = [modified]
-  if (started - state.ledger.cursor > 3600_000 && (await countOrders(context, modified)) > MAX_PAGES * PAGE_SIZE * 0.8) {
+  if (started - ledgerReadAt(state.ledger) > 3600_000 && (await countOrders(context, modified)) > MAX_PAGES * PAGE_SIZE * 0.8) {
     queries.length = 0
-    for (let from = state.ledger.cursor - SLICE_LOOKBACK_DAYS * DAY_MS; from < started + DAY_MS; from += SLICE_DAYS * DAY_MS) {
+    for (let at = from - SLICE_LOOKBACK_DAYS * DAY_MS; at < Math.max(started, from) + DAY_MS; at += SLICE_DAYS * DAY_MS) {
       queries.push(
-        `${modified}&created_on_min=${encodeURIComponent(vnIso(from))}&created_on_max=${encodeURIComponent(vnIso(from + SLICE_DAYS * DAY_MS - 1000))}`,
+        `${modified}&created_on_min=${encodeURIComponent(vnIso(at))}&created_on_max=${encodeURIComponent(vnIso(at + SLICE_DAYS * DAY_MS - 1000))}`,
       )
     }
   }
 
+  const seen = { newest: NaN, untimed: false }
+  const today = vnDate(new Date())
   for (const query of queries) {
     await eachPage(context, query, (orders) => {
-      // Looked up each page: a full read of today may have replaced them meanwhile.
+      newestModified(orders, seen)
+      // Looked up each page: a full read of today may have replaced it meanwhile.
       const live = state.live
-      const today = live ? state.days[live.day] : undefined
+      let changed = false
       for (const order of orders) {
         countRefunds(state.ledger, order)
-        if (!live || !today || live.ids.has(order.id) || vnDate(new Date(placedAt(order))) !== live.day) continue
-        live.ids.add(order.id)
-        addOrder({ sources: today.sources, products: (today.products ??= {}), refunds: today.refunds }, order)
+        const at = placedAt(order)
+        if (Number.isNaN(at)) continue
+        const day = vnDay(at)
+        if (live && day === live.day) {
+          if (keepNewer(live.orders, factsOf(order, OTHER_CHANNEL))) changed = true
+          continue
+        }
+        const kept = day < today ? state.days[day] : undefined
+        if (kept && changesKeptDay(factsOf(order, OTHER_CHANNEL), order, kept.computedAt, state.signatures.get(day))) {
+          markRecheck(state.rechecks, day, Date.now())
+        }
       }
+      if (live && changed) setDay(state, live.day, statsOf(live.orders, live.day, Date.now()))
     })
   }
 
   const ledger = state.ledger
   const live = state.live
+  let cursor = nextCursor(from, seen, started)
   // A read of today that ended while this one ran replaced the day this one
-  // was adding orders to: the next ledger read goes back to when it started.
-  ledger.cursor = live && live.fullAt >= started ? Math.min(started, live.readFrom) : started
+  // was adding orders to: the next ledger read goes back to where the ledger
+  // stood when that read began.
+  if (live && live.fullAt >= started) cursor = Math.min(cursor, live.fromCursor)
+  ledger.cursor = cursor
+  ledger.readAt = started
   for (const [id, at] of Object.entries(ledger.recent)) if (at < ledger.cursor - RECENT_MS) delete ledger.recent[id]
   if (live) {
     live.at = Date.now()
-    const today = state.days[live.day]
-    if (today) today.computedAt = live.at
+    const day = state.days[live.day]
+    if (day) day.computedAt = live.at
   }
   // Written now and then, and after a long read — not on every small one.
   if (Date.now() - state.persistedAt > PERSIST_MS || Date.now() - started > 60_000) await persist(context.connectionId, state)
@@ -729,8 +792,20 @@ function syncLedger(context: ConnectionContext, state: State): Promise<void> | n
 function refreshDay(context: ConnectionContext, state: State, day: string): Promise<DayStats> {
   // The short memo only merges concurrent refreshes of the same day.
   return memo(`sapo-day:${context.connectionId}:${day}`, 10_000, async () => {
-    const { stats } = await computeDay(context, day)
-    state.days[day] = stats
+    const began = Date.now()
+    const orders = await readDay(context, state, day)
+    // The live day, read again as an earlier one (just after midnight): its
+    // orders the ledger saw change later keep that version, and the ledger
+    // goes on from these.
+    const live = state.live
+    if (live?.day === day) {
+      for (const [id, facts] of live.orders) if (orders.has(id)) keepNewer(orders, facts)
+      live.orders = orders
+    }
+    const stats = statsOf(orders, day, Date.now())
+    setDay(state, day, stats)
+    keepSignatures(state, day, orders)
+    settleRecheck(state.rechecks, day, began)
     // Written now and then while many days come in; the last worker writes the rest.
     if (Date.now() - state.persistedAt > BACKFILL_PERSIST_MS) await persist(context.connectionId, state)
     return stats
@@ -739,10 +814,13 @@ function refreshDay(context: ConnectionContext, state: State, day: string): Prom
 
 /**
  * Fills in `days` behind the response, DAY_WORKERS at a time, most recent
- * first. The store's gate keeps them all within its call budget together.
+ * first. The store's gate keeps them all within its call budget together. A
+ * day whose last read failed is left out until it has waited (see mayRetry),
+ * so a failing store is not asked for the same days round after round.
  */
 function enqueue(context: ConnectionContext, state: State, days: string[]) {
-  for (const day of days) if (!state.reading.has(day)) state.queue.add(day)
+  const now = Date.now()
+  for (const day of days) if (!state.reading.has(day) && mayRetry(state.failed, day, now)) state.queue.add(day)
   while (state.workers < Math.min(DAY_WORKERS, state.queue.size)) {
     state.workers += 1
     void (async () => {
@@ -754,9 +832,9 @@ function enqueue(context: ConnectionContext, state: State, days: string[]) {
           state.reading.add(day)
           try {
             await refreshDay(context, state, day)
-            state.lastError = null
+            state.failed.delete(day)
           } catch (error) {
-            state.lastError = error instanceof Error ? error.message : String(error)
+            recordFailure(state.failed, day, error instanceof Error ? error.message : String(error), Date.now())
           } finally {
             state.reading.delete(day)
           }
@@ -766,6 +844,35 @@ function enqueue(context: ConnectionContext, state: State, days: string[]) {
         if (state.workers === 0) await persist(context.connectionId, state).catch(() => {})
       }
     })()
+  }
+}
+
+/** Lets one earlier day marked by the ledger through to be read again, when one is due (see takeRecheck). */
+function admitRecheck(context: ConnectionContext, state: State) {
+  if (state.rechecks.marks.size === 0) return
+  const now = Date.now()
+  const today = vnDate(new Date())
+  const day = takeRecheck(
+    state.rechecks,
+    now,
+    (d) => state.days[d]?.computedAt,
+    (d) => d >= today || !state.days[d] || state.reading.has(d) || state.queue.has(d) || !mayRetry(state.failed, d, now),
+  )
+  if (day) enqueue(context, state, [day])
+}
+
+/** Waits for `work`, but no later than `until` (epoch ms); whether it finished. */
+async function within(work: Promise<unknown>, until: number): Promise<boolean> {
+  const left = until - Date.now()
+  if (left <= 0) return false
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const late = new Promise<boolean>((resolve) => {
+    timer = setTimeout(() => resolve(false), left)
+  })
+  try {
+    return await Promise.race([work.then(() => true), late])
+  } finally {
+    clearTimeout(timer)
   }
 }
 
@@ -809,13 +916,32 @@ function refundsOn(state: State, day: string, channels: string[] | null): Refund
     for (const cell of hours) cell.forEach((value, i) => (out[i] += value))
     return out
   }
-  for (const stats of Object.values(state.days)) {
-    for (const [channel, cell] of Object.entries(stats.refunds?.[day] ?? {})) {
-      if (channels && !channels.includes(channel)) continue
-      cell.forEach((value, i) => (out[i] += value))
-    }
+  for (const [channel, cell] of refundIndexOf(state).get(day) ?? []) {
+    if (channels && !channels.includes(channel)) continue
+    cell.forEach((value, i) => (out[i] += value))
   }
   return out
+}
+
+/**
+ * The refunds on the kept days' orders, gathered by the day made — for the days
+ * before the ledger, which count their returns from them. Once for all the days
+ * asked, rather than every kept day scanned for each (a year of days, for each
+ * of a view's days). The cells stay in the order the kept days are, so the sums
+ * are the same to the last bit as a scan would give.
+ */
+function refundIndexOf(state: State): Map<string, Array<[string, RefundTally]>> {
+  if (state.refundIndex) return state.refundIndex
+  const index = new Map<string, Array<[string, RefundTally]>>()
+  for (const stats of Object.values(state.days)) {
+    for (const [day, perChannel] of Object.entries(stats.refunds ?? {})) {
+      if (day >= state.ledger.since) continue
+      const list = index.get(day) ?? index.set(day, []).get(day)!
+      for (const entry of Object.entries(perChannel)) list.push(entry)
+    }
+  }
+  state.refundIndex = index
+  return index
 }
 
 /** The days a day before the ledger counts its returns from; none for a ledger day. */
@@ -935,9 +1061,11 @@ export async function syncSapoInBackground(context: ConnectionContext): Promise<
   await syncLedger(context, state)
 
   const recent = daysBetween(shiftDay(today, -(WARM_DAYS - 1)), shiftDay(today, -1))
-  const due = new Set(recent.filter((day) => !isFresh(day, state.days[day], today) || !hasProducts(state.days[day])))
+  const due = new Set(recent.filter((day) => !isFresh(day, state.days[day], today) || !hasHourValues(state.days[day])))
   for (const day of recent) for (const earlier of returnDaysOf(state, day)) if (!isFresh(earlier, state.days[earlier], today)) due.add(earlier)
   if (due.size > 0) enqueue(context, state, [...due])
+  // An earlier day the ledger saw one of its orders change on, read again when its turn comes.
+  admitRecheck(context, state)
 }
 
 /** The channels seen in the last 30 synced days, busiest first. */
@@ -968,9 +1096,16 @@ export async function sapoOverview(context: ConnectionContext, period: Period): 
   const previousDays = daysBetween(period.previousStart, period.previousEnd)
   const wanted = [...currentDays, ...previousDays]
 
+  // Nothing here waits on Sapo longer than this — nor past RESPONSE_BUDGET_MS
+  // into a read of today already under way, so a page asking every few
+  // seconds is not held each time by the same long read.
+  const until = Date.now() + RESPONSE_BUDGET_MS
+  const budget = () => Math.min(until, (state.todayReadSince || Date.now()) + RESPONSE_BUDGET_MS)
+
   // Today's orders are read whole only when the view reaches today. The first
-  // read is waited for; the re-read every ten minutes (for cancellations) goes
-  // on behind the response, which answers with today as the ledger keeps it.
+  // read is waited for, within the budget: past it the response goes out with
+  // today marked as still syncing. The safety-net re-read goes on behind the
+  // response, which answers with today as the ledger keeps it.
   if (period.end === today) {
     const read = refreshToday(context, state, today).then(
       () => {
@@ -980,15 +1115,16 @@ export async function sapoOverview(context: ConnectionContext, period: Period): 
         state.todayError = error instanceof Error ? error.message : String(error)
       },
     )
-    if (state.live?.day !== today || !state.days[today]) await read
+    if (state.live?.day !== today || !state.days[today]) await within(read, budget())
     if (state.todayError) failures.push({ source: 'Sapo', message: state.todayError })
   }
   // The refunds — and today's newest orders — through the ledger. A long
   // catch-up (the first run, or after a quiet spell) goes on behind the
   // response; the usual few seconds' worth is waited for.
   const sweep = syncLedger(context, state)
-  if (sweep && Date.now() - state.ledger.cursor < CATCH_UP_MS) await sweep
+  if (sweep && Date.now() - ledgerReadAt(state.ledger) < CATCH_UP_MS) await within(sweep, until)
   if (state.sweepError) failures.push({ source: 'Sapo', message: state.sweepError })
+  admitRecheck(context, state)
 
   // The earlier days whose orders the view's days before the ledger count their returns from.
   const listed = new Set(wanted)
@@ -1003,19 +1139,23 @@ export async function sapoOverview(context: ConnectionContext, period: Period): 
 
   // The product lists need the view's own days read with their current product figures; a day kept from before is read once more.
   const stale = [...wanted, ...currentReturnDays, ...previousReturnDays].filter(
-    (day) => day !== today && (!isFresh(day, state.days[day], today) || (currentDays.includes(day) && !hasProducts(state.days[day]))),
+    (day) => day !== today && (!isFresh(day, state.days[day], today) || (currentDays.includes(day) && !hasHourValues(state.days[day]))),
   )
   const adminUrl = productAdminUrl(context)
   if (stale.length > 0) enqueue(context, state, stale)
-  if (state.lastError) failures.push({ source: 'Sapo', message: state.lastError })
-  const missing = (days: string[]) => days.filter((day) => !state.days[day]).length
+  const failedDays = currentFailure(state.failed, Date.now())
+  if (failedDays) failures.push({ source: 'Sapo', message: failedDays })
+  // Today counts as missing until it has been read whole in this run: what the
+  // file kept of it may be hours old, and is never shown as final.
+  const unread = (day: string) => !state.days[day] || (day === today && state.live?.day !== today)
+  const missing = (days: string[]) => days.filter(unread).length
   const pendingDays = missing(wanted)
   const sync = {
     current: missing(currentDays),
     previous: missing(previousDays) + missing(previousReturnDays),
     total: wanted.length + currentReturnDays.length + previousReturnDays.length,
     returns: missing(currentReturnDays),
-    catchingUp: Date.now() - state.ledger.cursor > BEHIND_MS,
+    catchingUp: Date.now() - ledgerReadAt(state.ledger) > BEHIND_MS,
   }
   const scope = { channels }
   const fetchedAt = state.live?.day === today ? new Date(state.live.at).toISOString() : null
@@ -1072,7 +1212,7 @@ export async function sapoOverview(context: ConnectionContext, period: Period): 
       sync,
       scope,
       fetchedAt,
-      hours: hoursOf(state, range, today, channels, currentDays, previousDays),
+      hours: hoursOf(state, range, today, channels, currentDays),
       products: productsOf(state, channels, currentDays, adminUrl, period.end < today ? period.end : null),
       failures,
     }
@@ -1105,10 +1245,103 @@ export async function sapoOverview(context: ConnectionContext, period: Period): 
     sync,
     scope,
     fetchedAt,
-    hours: hoursOf(state, range, today, channels, currentDays, previousDays),
+    hours: hoursOf(state, range, today, channels, currentDays),
     products: productsOf(state, channels, currentDays, adminUrl, period.end < today ? period.end : null),
     failures,
   }
+}
+
+/** One product's orders on one day, over the chosen channels — see sapoProductDays. */
+export type SapoProductDay = {
+  name: string
+  orders: number
+  quantity: number
+  cancelled: number
+  gmv: number
+  cancelledGmv: number
+  skus: string[]
+  /** Hour of the day (Vietnam time) → [orders, cancelled]; hours without orders left out. */
+  hours: Record<string, [number, number]>
+}
+
+/**
+ * The products sold on each of `days`, over the channels chosen for the
+ * project — for the reports that look at products day by day (orders and
+ * cancellations per product, and when in the day they come). Read from the
+ * same day store as the overview, so nothing is fetched twice: days missing,
+ * or kept from before products carried their SKUs and hours, are filled in
+ * behind the response and counted in `pendingDays` until they land.
+ */
+export async function sapoProductDays(
+  context: ConnectionContext,
+  days: string[],
+): Promise<{
+  days: Record<string, Record<string, SapoProductDay>>
+  /** The day's orders as orders (an order holding two products counts once): created, cancelled, and both by hour. */
+  totals: Record<string, { created: number; cancelled: number; hours: Array<[number, number]> }>
+  pendingDays: number
+  failures: Failure[]
+}> {
+  const today = vnDate(new Date())
+  const state = await stateFor(context.connectionId)
+  state.viewedAt = Date.now()
+  const channels = selectionOf(context.metadata).sapoChannels
+  const failures: Failure[] = []
+
+  const until = Date.now() + RESPONSE_BUDGET_MS
+  if (days.includes(today)) {
+    const read = refreshToday(context, state, today).then(
+      () => {
+        state.todayError = null
+      },
+      (error) => {
+        state.todayError = error instanceof Error ? error.message : String(error)
+      },
+    )
+    // Within the budget, as for the overview: past it today is counted as still pending.
+    if (state.live?.day !== today || !hasProducts(state.days[today])) {
+      await within(read, Math.min(until, (state.todayReadSince || Date.now()) + RESPONSE_BUDGET_MS))
+    }
+    if (state.todayError) failures.push({ source: 'Sapo', message: state.todayError })
+    const sweep = syncLedger(context, state)
+    if (sweep && Date.now() - ledgerReadAt(state.ledger) < CATCH_UP_MS) await within(sweep, until)
+  }
+
+  const stale = days.filter((day) => day !== today && (!isFresh(day, state.days[day], today) || !hasProducts(state.days[day])))
+  if (stale.length > 0) enqueue(context, state, stale)
+  const failedDays = currentFailure(state.failed, Date.now())
+  if (failedDays) failures.push({ source: 'Sapo', message: failedDays })
+
+  const out: Record<string, Record<string, SapoProductDay>> = {}
+  const totals: Record<string, { created: number; cancelled: number; hours: Array<[number, number]> }> = {}
+  for (const day of days) {
+    const stats = state.days[day]
+    if (!hasProducts(stats)) continue
+    const tally = combine(stats, channels)!
+    totals[day] = { created: tally.created, cancelled: tally.cancelled, hours: tally.hours.map((hour): [number, number] => [hour[0], hour[1]]) }
+    const merged: Record<string, SapoProductDay> = {}
+    for (const [channel, list] of Object.entries(stats!.products!)) {
+      if (channels && !channels.includes(channel)) continue
+      for (const [key, product] of Object.entries(list)) {
+        const into = (merged[key] ??= { name: product.name, orders: 0, quantity: 0, cancelled: 0, gmv: 0, cancelledGmv: 0, skus: [], hours: {} })
+        into.orders += product.orders
+        into.quantity += product.quantity
+        into.cancelled += product.cancelled ?? 0
+        into.gmv += product.gmv ?? 0
+        into.cancelledGmv += product.cancelledGmv ?? 0
+        for (const sku of product.skus ?? []) if (!into.skus.includes(sku)) into.skus.push(sku)
+        for (const [hour, [orders, cancelled]] of Object.entries(product.hours ?? {})) {
+          const cell = (into.hours[hour] ??= [0, 0])
+          cell[0] += orders
+          cell[1] += cancelled
+        }
+      }
+    }
+    out[day] = merged
+  }
+  // Today stays pending until read whole in this run (see sapoOverview).
+  const pending = (day: string) => !hasProducts(state.days[day]) || (day === today && state.live?.day !== today)
+  return { days: out, totals, pendingDays: days.filter(pending).length, failures }
 }
 
 /** How long the product catalog is kept between reads. */
@@ -1188,12 +1421,26 @@ function productsOf(
   endedOn: string | null,
 ): SapoProducts {
   const merged = new Map<string, Required<ProductDay>>()
+  // Orders by the hour placed, summed over the days that kept hours (products version 3 on).
+  const byHour = new Map<string, number[]>()
+  // Their sales (value less the cancelled orders'): only once every day of the view has them
+  // (version 4) — a sum over some of the days would read as the whole view's.
+  const byHourSales = new Map<string, number[]>()
+  const salesKnown = currentDays.every((day) => !state.days[day]?.products || hasHourValues(state.days[day]))
   for (const day of currentDays) {
     const perChannel = state.days[day]?.products
     if (!perChannel) continue
     for (const [channel, list] of Object.entries(perChannel)) {
       if (channels && !channels.includes(channel)) continue
       for (const [key, product] of Object.entries(list)) {
+        if (product.hours) {
+          const hours = byHour.get(key) ?? byHour.set(key, Array.from({ length: 24 }, () => 0)).get(key)!
+          for (const [hour, [orders]] of Object.entries(product.hours)) hours[Number(hour)] += orders
+          if (salesKnown) {
+            const sales = byHourSales.get(key) ?? byHourSales.set(key, Array.from({ length: 24 }, () => 0)).get(key)!
+            for (const [hour, cell] of Object.entries(product.hours)) sales[Number(hour)] += (cell[2] ?? 0) - (cell[3] ?? 0)
+          }
+        }
         const seen = merged.get(key)
         if (!seen) {
           merged.set(key, { cancelled: 0, gmv: 0, cancelledGmv: 0, ...product } as Required<ProductDay>)
@@ -1223,6 +1470,8 @@ function productsOf(
         gmv: p.gmv,
         cancelledGmv: p.cancelledGmv,
         last: p.last,
+        hours: byHour.get(key) ?? null,
+        hourSales: salesKnown ? (byHourSales.get(key) ?? null) : null,
       }))
       .sort((a, b) => b.orders - a.orders),
     since: Date.parse(`${currentDays[0]}T00:00:00+07:00`),
@@ -1239,9 +1488,7 @@ function productsOf(
  * The today view counts today's orders in each hour, the one in progress
  * included; hours still ahead are null. The longer views give the average per
  * day for each hour, and today joins only for the hours it has finished, so a
- * half-over day never drags the evening down. The previous period of the same
- * length is figured the same way, and the weekday rows average the view's
- * days one weekday at a time.
+ * half-over day never drags the evening down.
  */
 function hoursOf(
   state: State,
@@ -1249,7 +1496,6 @@ function hoursOf(
   today: string,
   channels: string[] | null,
   currentDays: string[],
-  previousDays: string[],
 ): SapoHours {
   const single = range === 'today'
   const hourNow = new Date(Date.now() + VN_OFFSET_MS).getUTCHours()
@@ -1262,35 +1508,25 @@ function hoursOf(
     })
   const perHour = (list: Array<{ day: string; tally: Tally }>) => {
     const totals = Array.from({ length: 24 }, () => 0)
+    const sales = Array.from({ length: 24 }, () => 0)
     const days = Array.from({ length: 24 }, () => 0)
     for (const { day, tally } of list) {
       for (let hour = 0; hour < 24; hour++) {
         if (!countsHour(day, hour)) continue
         totals[hour] += tally.hours[hour][0]
+        // The hour's value less its cancelled orders' (HourTally: gmv at 2, cancelled value at 3).
+        sales[hour] += tally.hours[hour][2] - tally.hours[hour][3]
         days[hour] += 1
       }
     }
-    const values = totals.map((sum, hour) => (days[hour] === 0 ? null : single ? sum : sum / days[hour]))
-    return { totals, days, values }
+    const per = (sums: number[]) => sums.map((sum, hour) => (days[hour] === 0 ? null : single ? sum : sum / days[hour]))
+    return { values: per(totals), salesValues: per(sales) }
   }
 
-  const own = synced(currentDays)
-  const mine = perHour(own)
-  const before = synced(previousDays)
-  const week = single
-    ? []
-    : [1, 2, 3, 4, 5, 6, 0].map((weekday) => {
-        const row = perHour(own.filter(({ day }) => new Date(`${day}T00:00:00Z`).getUTCDay() === weekday))
-        return { weekday, hours: row.values, counts: row.days }
-      })
-
+  const mine = perHour(synced(currentDays))
   return {
     profile: mine.values,
-    totals: mine.totals,
-    counts: mine.days,
-    previous: before.length > 0 ? perHour(before).values.map((v) => v ?? 0) : null,
-    week,
+    revenue: mine.salesValues,
     currentHour: currentDays.includes(today) ? hourNow : null,
-    days: own.length,
   }
 }

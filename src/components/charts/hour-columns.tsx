@@ -2,9 +2,8 @@
 
 import { useState } from 'react'
 import Box from '@mui/material/Box'
-import Stack from '@mui/material/Stack'
-import Typography from '@mui/material/Typography'
-import { known, niceTicks, roundedTop, useTweened, useWidth } from './chart-kit'
+import { known, niceTicks, roundedTop, useChartPointer, useTweened, useWidth } from './chart-kit'
+import { ChartTooltip, TipContent, type TipRow } from './chart-tooltip'
 
 /**
  * Orders by hour of the day: 24 columns, midnight to midnight.
@@ -24,6 +23,7 @@ export function HourColumns({
   peak = null,
   currentHour = null,
   detail,
+  rows: rowsFor,
   color,
   height = 190,
   format,
@@ -41,6 +41,12 @@ export function HourColumns({
   currentHour?: number | null
   /** An extra tooltip line for an hour (the total behind an average). */
   detail?: (hour: number) => string | null
+  /**
+   * The tooltip's figures for an hour, in place of the single value row —
+   * for a chart that is one measure of several read together (the chart's own
+   * row marked by the caller). The reference then goes in the notes.
+   */
+  rows?: (hour: number) => TipRow[]
   color: string
   height?: number
   format: (value: number) => string
@@ -80,8 +86,8 @@ export function HourColumns({
   const nearest = (clientX: number, rect: DOMRect) =>
     step > 0 ? Math.min(23, Math.max(0, Math.floor((clientX - rect.left - MARGIN.left) / step))) : null
   const tooltipLeft = active === null ? 0 : cx(active)
-  const flip = tooltipLeft > width * 0.6
   const extra = active !== null && detail ? detail(active) : null
+  const pointer = useChartPointer<number>(setActive, (event) => nearest(event.clientX, event.currentTarget.getBoundingClientRect()), () => setActive(peak?.start ?? 0))
 
   return (
     <Box ref={ref} sx={{ position: 'relative', width: '100%', height: svgHeight }}>
@@ -93,10 +99,7 @@ export function HourColumns({
           aria-label={ariaLabel}
           tabIndex={0}
           style={{ display: 'block', outline: 'none', touchAction: 'pan-y' }}
-          onPointerMove={(event) => setActive(nearest(event.clientX, event.currentTarget.getBoundingClientRect()))}
-          onPointerLeave={() => setActive(null)}
-          onFocus={() => setActive(peak?.start ?? 0)}
-          onBlur={() => setActive(null)}
+          {...pointer}
           onKeyDown={(event) => {
             if (event.key === 'ArrowLeft') setActive(Math.max(0, (active ?? 1) - 1))
             if (event.key === 'ArrowRight') setActive(Math.min(23, (active ?? -1) + 1))
@@ -197,62 +200,22 @@ export function HourColumns({
       ) : null}
 
       {active !== null && width > 0 ? (
-        <Box
-          role="status"
-          sx={{
-            position: 'absolute',
-            top: 0,
-            left: flip ? undefined : tooltipLeft + step / 2 + 8,
-            right: flip ? width - tooltipLeft + step / 2 + 8 : undefined,
-            minWidth: 170,
-            px: 1.5,
-            py: 1,
-            borderRadius: 2,
-            pointerEvents: 'none',
-            backgroundColor: 'var(--adshub-surface-floating)',
-            boxShadow: '0 12px 32px -18px rgb(0 0 0 / 0.45)',
-            backdropFilter: 'blur(12px)',
-          }}
-        >
-          <Typography variant="caption" sx={{ display: 'block', color: 'text.secondary', mb: 0.5 }}>
-            {text.hourRange(active)}
-          </Typography>
-          <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
-            <Box sx={{ width: 8, height: 8, borderRadius: '2px', backgroundColor: color, flexShrink: 0, mx: '2px' }} />
-            <Typography variant="body2" sx={{ fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>
-              {known(values[active]) ? format(values[active] as number) : '—'}
-            </Typography>
-            <Typography variant="caption" sx={{ color: 'text.secondary' }}>
-              {text.value}
-            </Typography>
-          </Stack>
-          {reference ? (
-            <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
-              <Box sx={{ width: 12, height: 0, borderTop: '2px solid', borderColor: 'text.primary', flexShrink: 0 }} />
-              <Typography variant="body2" sx={{ fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>
-                {format(reference[active])}
-              </Typography>
-              <Typography variant="caption" sx={{ color: 'text.secondary' }}>
-                {text.reference}
-              </Typography>
-            </Stack>
-          ) : null}
-          {extra ? (
-            <Typography variant="caption" sx={{ display: 'block', color: 'text.disabled' }}>
-              {extra}
-            </Typography>
-          ) : null}
-          {inPeak(active) ? (
-            <Typography variant="caption" sx={{ display: 'block', color: 'text.secondary', mt: 0.5 }}>
-              {text.inPeak}
-            </Typography>
-          ) : null}
-          {active === currentHour ? (
-            <Typography variant="caption" sx={{ display: 'block', color: 'text.disabled' }}>
-              {text.inProgress}
-            </Typography>
-          ) : null}
-        </Box>
+        <ChartTooltip x={tooltipLeft} gap={step / 2 + 8} chartWidth={width} width={rowsFor ? 270 : 190} top={0}>
+          {/* The hour, its figure and the comparison as rows; what else is true of the hour as notes. */}
+          <TipContent
+            title={text.hourRange(active)}
+            tag={active === currentHour ? text.inProgress : undefined}
+            rows={
+              rowsFor
+                ? rowsFor(active)
+                : [
+                    { key: 'value', mark: 'bar', color, label: text.value, value: known(values[active]) ? format(values[active] as number) : '—', strong: true },
+                    ...(reference ? [{ key: 'reference', mark: 'line' as const, color: 'var(--mui-palette-text-primary)', label: text.reference, value: format(reference[active]) }] : []),
+                  ]
+            }
+            notes={[rowsFor && reference ? `${text.reference}: ${format(reference[active])}` : null, extra, inPeak(active) ? text.inPeak : null]}
+          />
+        </ChartTooltip>
       ) : null}
     </Box>
   )

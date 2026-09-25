@@ -2,26 +2,53 @@ import 'server-only'
 
 import { buildQueryString } from '@/core/plugins/http'
 import type { ConnectionContext } from '@/core/plugins/types'
+import { dayStore, settlingFreshness, type DayRead } from '@/modules/analytics/data/day-store'
 import { BASE_URL, authHeaders } from '@/plugins/tiktok-ads/context'
-import { sendPatiently } from '@/plugins/tiktok-ads/gmv-max'
+import { sendPatiently, type RequestPriority } from '@/plugins/tiktok-ads/gmv-max'
 import { memo } from './cache'
+import {
+  addRow,
+  assembleRows,
+  composeDays,
+  composeHours,
+  composeToday,
+  copy,
+  dayOf,
+  readSpanFor,
+  settleGaps,
+  zero,
+  type GmvDay,
+  type GmvPair,
+  type Live,
+  type Row,
+} from './gmv-max-compose'
 import { daysBetween, shiftDay, vnDate, type Period } from './period'
 import { pairKey, selectionKey, selectionOf } from './selection'
 import type { Failure, GmvMaxOverview, GmvMaxTotals } from './types'
+
+export type { GmvPair } from './gmv-max-compose'
 
 /**
  * GMV Max spend and revenue across the shops a TikTok connection runs it for
  * — all of them, or the ones chosen for this project's dashboard — as close
  * to live as TikTok allows.
  *
- * Two reads, on two clocks, because TikTok serves them at different speeds
- * (measured on a live account):
+ * Three reads, on three clocks, because TikTok serves them at different
+ * speeds (measured on a live account) and most of a view does not move:
  *
  *  · Today's running total per shop — a report with no time dimension —
  *    moves about once a minute. It is re-read every 25 seconds and drives the
  *    headline numbers and the last point of every chart.
- *  · The hour-by-hour and day-by-day breakdown lags about an hour. It is
- *    re-read every five minutes and draws the shape behind that last point.
+ *  · Today's hour-by-hour and day breakdown lags about an hour. It is re-read
+ *    every five minutes and draws the shape behind that last point.
+ *  · Every earlier day is kept on disk, per shop (gmvDays below): its row in
+ *    the daily report and its rows in the hourly one. A day is read once it
+ *    has settled and then never again; the last few days, which TikTok still
+ *    attributes orders to, are read again every quarter hour. A 30-day view
+ *    therefore costs today's reads, not sixty days of reports every five
+ *    minutes, and survives a restart. Days not kept yet are filled in behind
+ *    the response — the view says how many are on their way (`pendingDays`)
+ *    and never passes a short sum off as a whole one (gmv-max-compose.ts).
  *
  * Today's chart is cumulative: the hours TikTok has broken down, then a
  * straight run to the live total now. Hours it has not broken down yet stay
@@ -38,33 +65,28 @@ const METRICS = ['cost', 'gross_revenue', 'orders']
 const STORE_TTL = 30 * 60_000
 const SERIES_TTL = 5 * 60_000
 const LIVE_TTL = 25_000
+/**
+ * How long past its TTL a read is still shown while a fresh one runs behind
+ * it (cache.ts): the page answers at once, and the numbers catch up on its
+ * next refresh. A sweep that lost some of its reads is retried after
+ * RETRY_TTL instead of its full TTL.
+ */
+const STORE_STALE = 6 * 3600_000
+const SERIES_STALE = 30 * 60_000
+const LIVE_STALE = 5 * 60_000
+const RETRY_TTL = 30_000
+const retrySoon = (ttl: number) => (value: { failures: Failure[] }) => (value.failures.length > 0 ? Math.min(ttl, RETRY_TTL) : ttl)
 const CONCURRENCY = 4
-const VN_OFFSET_MS = 7 * 3600_000
 
-export type GmvPair = { advertiserId: string; advertiserName: string; storeId: string; storeName: string }
-type Row = { dimensions?: Record<string, string>; metrics?: Record<string, string | number> }
-
-const zero = (): GmvMaxTotals => ({ cost: 0, revenue: 0, orders: 0 })
-const copy = (t: GmvMaxTotals): GmvMaxTotals => ({ cost: t.cost, revenue: t.revenue, orders: t.orders })
-
-function addRow(target: GmvMaxTotals, row: Row) {
-  target.cost += Number(row.metrics?.cost ?? 0)
-  target.revenue += Number(row.metrics?.gross_revenue ?? 0)
-  target.orders += Number(row.metrics?.orders ?? 0)
-}
-
-function add(target: GmvMaxTotals, other: GmvMaxTotals) {
-  target.cost += other.cost
-  target.revenue += other.revenue
-  target.orders += other.orders
-}
-
-async function get(context: ConnectionContext, path: string, params: Record<string, unknown>) {
-  const response = await sendPatiently({
-    url: `${BASE_URL}${path}${buildQueryString(params)}`,
-    method: 'GET',
-    headers: authHeaders(context),
-  })
+async function get(context: ConnectionContext, path: string, params: Record<string, unknown>, priority: RequestPriority = 'interactive') {
+  const response = await sendPatiently(
+    {
+      url: `${BASE_URL}${path}${buildQueryString(params)}`,
+      method: 'GET',
+      headers: authHeaders(context),
+    },
+    { priority },
+  )
   const body = response.data as { code?: number; message?: string; data?: Record<string, unknown> } | null
   if (!response.ok || !body || body.code !== 0) {
     throw new Error(body?.message ? `TikTok ${body.code}: ${body.message}` : (response.error ?? 'TikTok request failed'))
@@ -85,6 +107,8 @@ async function pool<T, R>(items: T[], run: (item: T) => Promise<R>): Promise<R[]
   )
   return out
 }
+
+const messageOf = (error: unknown) => (error instanceof Error ? error.message : String(error))
 
 export function advertisersOf(metadata: Record<string, unknown>): Array<{ id: string; name: string }> {
   const list = Array.isArray(metadata.advertisers) ? metadata.advertisers : []
@@ -114,46 +138,59 @@ export function listGmvPairs(context: ConnectionContext): Promise<{ pairs: GmvPa
             advertiserName: a.name,
             storeId: String(s.store_id),
             storeName: String(s.store_name ?? s.store_id),
+            bcId: String(s.store_authorized_bc_id ?? ''),
           }))
       } catch (error) {
-        failures.push({ source: a.name || a.id, message: error instanceof Error ? error.message : String(error) })
+        failures.push({ source: a.name || a.id, message: messageOf(error) })
         return []
       }
     })
     return { pairs: lists.flat(), failures }
-  })
+  }, { staleMs: STORE_STALE, ttlOf: retrySoon(STORE_TTL) })
 }
 
-async function report(context: ConnectionContext, pair: GmvPair, start: string, end: string, hourly: boolean): Promise<Row[]> {
+/** The pairs the project's dashboard counts: all of them, or the ones chosen (selection.ts). */
+async function chosenPairs(context: ConnectionContext) {
+  const selected = selectionOf(context.metadata).gmvStores
+  const { pairs: all, failures } = await listGmvPairs(context)
+  const pairs = selected ? all.filter((p) => selected.includes(pairKey(p.advertiserId, p.storeId))) : all
+  return { all, pairs, failures, selection: selectionKey(selected) }
+}
+
+/**
+ * One shop's GMV Max report from `start` to `end`, by day or by hour. TikTok
+ * answers an hourly report for one day at most ("max time span is 1 day when
+ * use 'stat_time_hour'"), so a longer hourly span is asked for day by day, in
+ * order — the rows come back as one report over the span would list them.
+ */
+async function report(context: ConnectionContext, pair: GmvPair, start: string, end: string, hourly: boolean, priority: RequestPriority = 'interactive'): Promise<Row[]> {
+  if (hourly && start < end) {
+    const rows: Row[] = []
+    for (const day of daysBetween(start, end)) rows.push(...(await report(context, pair, day, day, true, priority)))
+    return rows
+  }
   const rows: Row[] = []
   for (let page = 1; ; page++) {
-    const data = await get(context, '/gmv_max/report/get/', {
-      advertiser_id: pair.advertiserId,
-      store_ids: [pair.storeId],
-      start_date: start,
-      end_date: end,
-      dimensions: ['advertiser_id', hourly ? 'stat_time_hour' : 'stat_time_day'],
-      metrics: METRICS,
-      page,
-      page_size: 1000,
-    })
+    const data = await get(
+      context,
+      '/gmv_max/report/get/',
+      {
+        advertiser_id: pair.advertiserId,
+        store_ids: [pair.storeId],
+        start_date: start,
+        end_date: end,
+        dimensions: ['advertiser_id', hourly ? 'stat_time_hour' : 'stat_time_day'],
+        metrics: METRICS,
+        page,
+        page_size: 1000,
+      },
+      priority,
+    )
     rows.push(...(Array.isArray(data.list) ? (data.list as Row[]) : []))
     const info = (data.page_info ?? {}) as { total_page?: number }
     if (page >= Number(info.total_page ?? 1)) return rows
   }
 }
-
-/** A daily report may span at most 30 days (TikTok 40002): a longer span is read in pieces. */
-async function reportSpan(context: ConnectionContext, pair: GmvPair, start: string, end: string, hourly: boolean): Promise<Row[]> {
-  const rows: Row[] = []
-  for (let from = start; from <= end; from = shiftDay(from, 30)) {
-    const last = shiftDay(from, 29)
-    rows.push(...(await report(context, pair, from, last < end ? last : end, hourly)))
-  }
-  return rows
-}
-
-const timeOf = (row: Row) => String(row.dimensions?.stat_time_hour ?? row.dimensions?.stat_time_day ?? '')
 
 /* ------------------------------------------------------------- live read --- */
 
@@ -184,19 +221,6 @@ function steady(key: string, day: string, fresh: GmvMaxTotals): GmvMaxTotals {
   return copy(previous.totals)
 }
 
-type Live = {
-  totals: Map<string, GmvMaxTotals>
-  at: number
-  failures: Failure[]
-  /**
-   * Adopts a fresher figure for a shop's today — the breakdown report is
-   * sometimes a few seconds ahead of the running total (TikTok's replicas
-   * disagree). Every view in this refresh window, and the next live read,
-   * then start from it, so "today" is one number on every range.
-   */
-  raise: (key: string, totals: GmvMaxTotals) => void
-}
-
 function loadLive(context: ConnectionContext, pairs: GmvPair[], selection: string, today: string): Promise<Live> {
   return memo(`gmv-live:${context.connectionId}:${selection}:${today}`, LIVE_TTL, async () => {
     const failures: Failure[] = []
@@ -221,187 +245,223 @@ function loadLive(context: ConnectionContext, pairs: GmvPair[], selection: strin
         for (const row of Array.isArray(data.list) ? (data.list as Row[]) : []) addRow(fresh, row)
         totals.set(key, steady(`${context.connectionId}:${key}`, today, fresh))
       } catch (error) {
-        failures.push({ source: pair.storeName, message: error instanceof Error ? error.message : String(error) })
+        failures.push({ source: pair.storeName, message: messageOf(error) })
       }
     })
     return { totals, at: Date.now(), failures, raise }
-  })
+  }, { staleMs: LIVE_STALE, ttlOf: retrySoon(LIVE_TTL) })
 }
 
 /** For a view that ends before today: nothing live to read, everything is in the reports. */
 const noLive = (): Live => ({ totals: new Map(), at: Date.now(), failures: [], raise: () => {} })
 
-/* ------------------------------------------------------ breakdown read --- */
+/* ------------------------------------------------------- today's breakdown --- */
 
-type Series = { perPair: Array<{ pair: GmvPair; rows: Row[] }>; failures: Failure[] }
-
-function loadSeries(context: ConnectionContext, pairs: GmvPair[], period: Period, selection: string): Promise<Series> {
-  const hourly = period.range === 'today'
-  const span = `${period.range}:${period.start}:${period.end}`
-  return memo(`gmv-series:${context.connectionId}:${span}:${selection}`, SERIES_TTL, async () => {
-    const failures: Failure[] = []
-    const perPair = await pool(pairs, async (pair) => {
+/**
+ * One shop's report rows for today — by hour, or its one daily row — on the
+ * five-minute clock. Kept per shop, so a change of the dashboard's shop
+ * choice reads only the shops added, and the today view and a longer one
+ * share today's hours. A read that failed is carried as such (its rows empty,
+ * as a sweep with a failed shop always showed it) and asked again after
+ * RETRY_TTL.
+ */
+function loadToday(context: ConnectionContext, pair: GmvPair, today: string, hourly: boolean): Promise<{ rows: Row[]; failure: Failure | null }> {
+  const key = pairKey(pair.advertiserId, pair.storeId)
+  return memo(
+    `gmv-today:${context.connectionId}:${key}:${today}:${hourly ? 'hour' : 'day'}`,
+    SERIES_TTL,
+    async () => {
       try {
-        // The period and the one before it are read separately, each in
-        // pieces of at most 30 days (see reportSpan).
-        const current = await reportSpan(context, pair, period.start, period.end, hourly)
-        const before = await reportSpan(context, pair, period.previousStart, period.previousEnd, hourly)
-        return { pair, rows: [...current, ...before] }
+        return { rows: await report(context, pair, today, today, hourly), failure: null }
       } catch (error) {
-        failures.push({ source: pair.storeName, message: error instanceof Error ? error.message : String(error) })
-        return { pair, rows: [] as Row[] }
+        return { rows: [] as Row[], failure: { source: pair.storeName, message: messageOf(error) } }
       }
-    })
-    return { perPair, failures }
+    },
+    { staleMs: SERIES_STALE, ttlOf: (value) => (value.failure ? RETRY_TTL : SERIES_TTL) },
+  )
+}
+
+/* ------------------------------------------------------------ kept days --- */
+
+/**
+ * The days still settling. TikTok keeps attributing orders to a day's ads for
+ * a while after it (and its spend lags by hours), so the last SETTLE_DAYS full
+ * days are read again every RECENT_MS; a day older than that is read once
+ * after it settled and kept. Conservative on purpose: a day kept too early
+ * would stay short for good, a day re-read too long costs one small report.
+ */
+const SETTLE_DAYS = 3
+const RECENT_MS = 15 * 60_000
+/**
+ * How far back days are kept: the longest custom view reaches CUSTOM_LOOKBACK_DAYS
+ * back and its comparison period CUSTOM_MAX_DAYS before that (period.ts).
+ */
+const KEEP_DAYS = 280
+/** A span read for one day serves every other day of the span read in the same burst (a backfill, a re-read of the settling days). */
+const SPAN_TTL = 2 * 60_000
+const SPAN_FAILED_TTL = 30_000
+/** How long a view waits for days it has nothing kept for, before answering with what it has and the rest pending. */
+const DAYS_WAIT_MS = 5_000
+const DAYS_POLL_MS = 250
+
+/**
+ * Which shop a context handed to the day store is for. The store keeps one
+ * file per (advertiser, shop) pair — its scope (day-store.ts, scopeOf) — so a
+ * change of the dashboard's shop choice never re-reads a shop already kept,
+ * and two shops' figures can never mix. The pair rides on the context's
+ * metadata, under a key nothing else uses, because the store hands its
+ * compute only a context and a day.
+ */
+const PAIR_FIELD = '__gmvDayPair'
+const withPair = (context: ConnectionContext, pair: GmvPair): ConnectionContext => ({ ...context, metadata: { ...context.metadata, [PAIR_FIELD]: pair } })
+const pairOf = (context: ConnectionContext) => (context.metadata[PAIR_FIELD] ?? null) as GmvPair | null
+
+/**
+ * The daily and the hourly report over one span of days, for one shop (see
+ * readSpanFor). Every day of a span that is being filled in or refreshed
+ * together shares the one read; a read that failed fails the whole span at
+ * once, instead of each of its days trying again in turn. Background priority
+ * (plugins/tiktok-ads/gmv-max.ts): nothing waits on it the way a page waits on
+ * today's figures.
+ */
+function readSpan(context: ConnectionContext, pair: GmvPair, from: string, to: string): Promise<{ daily: Row[]; hourly: Row[] }> {
+  const key = pairKey(pair.advertiserId, pair.storeId)
+  return memo(
+    `gmv-span:${context.connectionId}:${key}:${from}:${to}`,
+    SPAN_TTL,
+    async () => {
+      try {
+        const daily = await report(context, pair, from, to, false, 'background')
+        const hourly = await report(context, pair, from, to, true, 'background')
+        return { daily, hourly, error: null as string | null }
+      } catch (error) {
+        return { daily: [] as Row[], hourly: [] as Row[], error: messageOf(error) }
+      }
+    },
+    { ttlOf: (value) => (value.error ? SPAN_FAILED_TTL : SPAN_TTL) },
+  ).then((value) => {
+    if (value.error) throw new Error(value.error)
+    return value
   })
+}
+
+/** GMV Max per shop per day, kept on disk (.data/cache/gmv-days-{connection}-{advertiser}_{shop}.json). */
+const gmvDays = dayStore<GmvDay>({
+  name: 'gmv-days',
+  version: 1,
+  keepDays: KEEP_DAYS,
+  scopeOf: (context) => {
+    const pair = pairOf(context)
+    return pair ? `${pair.advertiserId}_${pair.storeId}` : ''
+  },
+  isFresh: settlingFreshness({ todayMs: SERIES_TTL, recentMs: RECENT_MS, settleDays: SETTLE_DAYS }),
+  workers: 2,
+  async compute(context, day) {
+    const pair = pairOf(context)
+    if (!pair) throw new Error('No GMV Max shop given')
+    const span = readSpanFor(day, vnDate(new Date()), SETTLE_DAYS + 1)
+    const { daily, hourly } = await readSpan(context, pair, span.from, span.to)
+    return dayOf(daily, hourly, day)
+  },
+})
+
+/**
+ * Each shop's kept days among `days`. Missing and outdated ones are queued
+ * with the store's workers (which read them most recent first and save them
+ * when done); when some are missing, the answer waits up to DAYS_WAIT_MS for
+ * them — a span read fills a month at once, so a first visit usually gets
+ * whole figures — and then goes with what it has, the rest pending.
+ *
+ * The store's own `wait` is not used: it reads the days it waits for outside
+ * the workers, and those are saved only with a later write.
+ */
+async function keptDays(context: ConnectionContext, pairs: GmvPair[], days: string[]): Promise<Array<DayRead<GmvDay>>> {
+  if (days.length === 0) return pairs.map(() => ({ values: {}, pendingDays: 0, failedDays: 0, error: null }))
+  const readAll = () => Promise.all(pairs.map((pair) => gmvDays.read(withPair(context, pair), days)))
+  let reads = await readAll()
+  const until = Date.now() + DAYS_WAIT_MS
+  while (reads.some((read) => read.pendingDays > 0) && Date.now() < until) {
+    await new Promise((resolve) => setTimeout(resolve, DAYS_POLL_MS))
+    reads = await readAll()
+  }
+  return reads
+}
+
+/**
+ * Queues the days a dashboard opens on — the last 30 and the 30 before them,
+ * for the 30-day view and its comparison — for the shops the project counts,
+ * without waiting for them: the background's warm-up (background.ts). The
+ * store reads only what is missing or due, so a warm-up after the first costs
+ * the settling days' one short report per shop.
+ */
+export async function warmGmvMaxDays(context: ConnectionContext): Promise<void> {
+  const { pairs } = await chosenPairs(context)
+  const today = vnDate(new Date())
+  const days = daysBetween(shiftDay(today, -60), shiftDay(today, -1))
+  await Promise.all(pairs.map((pair) => gmvDays.warm(withPair(context, pair), days)))
 }
 
 /* ------------------------------------------------------------- compose --- */
 
 export async function gmvMaxOverview(context: ConnectionContext, period: Period): Promise<GmvMaxOverview> {
-  const selected = selectionOf(context.metadata).gmvStores
-  const selection = selectionKey(selected)
-  const { pairs: all, failures: discovery } = await listGmvPairs(context)
-  const pairs = selected ? all.filter((p) => selected.includes(pairKey(p.advertiserId, p.storeId))) : all
+  const { all, pairs, failures: discovery, selection } = await chosenPairs(context)
 
-  // Today's running total is read only when the view reaches today.
+  // Today is read from TikTok (live total, and its breakdown) only when the view reaches it; every other day is kept.
   const today = vnDate(new Date())
-  const [series, live] = await Promise.all([
-    loadSeries(context, pairs, period, selection),
-    period.end === today ? loadLive(context, pairs, selection, today) : Promise.resolve(noLive()),
+  const reachesToday = period.end === today
+  const single = period.range === 'today'
+  const currentDays = daysBetween(period.start, period.end).filter((day) => day !== today)
+  const previousDays = daysBetween(period.previousStart, period.previousEnd)
+
+  const [kept, todayHourly, todayDaily, live] = await Promise.all([
+    keptDays(context, pairs, [...currentDays, ...previousDays]),
+    Promise.all(pairs.map((pair) => (reachesToday ? loadToday(context, pair, today, true) : Promise.resolve({ rows: [] as Row[], failure: null })))),
+    Promise.all(pairs.map((pair) => (reachesToday && !single ? loadToday(context, pair, today, false) : Promise.resolve({ rows: [] as Row[], failure: null })))),
+    reachesToday ? loadLive(context, pairs, selection, today) : Promise.resolve(noLive()),
   ])
 
-  const failures = [...discovery, ...series.failures, ...live.failures]
-  const base = { currency: 'VND', scope: { selected: pairs.length, total: all.length }, fetchedAt: new Date(live.at).toISOString(), failures }
-  return period.range === 'today' ? { ...base, ...composeToday(period, series, live) } : { ...base, ...composeDays(period, series, live) }
-}
-
-type Composed = Pick<GmvMaxOverview, 'totals' | 'previous' | 'byTime' | 'previousByTime' | 'byStore' | 'dataThrough'>
-
-function storeEntry(pair: GmvPair, totals: GmvMaxTotals): GmvMaxOverview['byStore'][number] {
-  return { ...copy(totals), storeId: pair.storeId, storeName: pair.storeName, advertiserName: pair.advertiserName }
-}
-
-function composeToday(period: Period, series: Series, live: Live): Composed {
-  const today = period.end
-  const clock = new Date(Date.now() + VN_OFFSET_MS)
-  const hourNow = clock.getUTCHours()
-  const minuteShare = clock.getUTCMinutes() / 60
-
-  const reported = Array.from({ length: 24 }, zero)
-  const yesterday = Array.from({ length: 24 }, zero)
-  const totals = zero()
-  const byStore: GmvMaxOverview['byStore'] = []
-  // The hour up to which every shop that spent today has been broken down.
-  let through = 23
-  let anySpend = false
-
-  for (const { pair, rows } of series.perPair) {
-    const own = zero()
-    let latest = -1
-    for (const row of rows) {
-      const at = timeOf(row)
-      const hour = Number(at.slice(11, 13))
-      if (at.startsWith(today)) {
-        addRow(reported[hour], row)
-        addRow(own, row)
-        if (Number(row.metrics?.cost ?? 0) > 0 && hour > latest) latest = hour
-      } else if (at.startsWith(period.previousStart)) {
-        addRow(yesterday[hour], row)
-      }
-    }
-    // The live total is fresher; it is never allowed below what the hourly report already shows.
-    const key = pairKey(pair.advertiserId, pair.storeId)
-    const fresh = live.totals.get(key)
-    const todayTotal = fresh && fresh.cost >= own.cost ? fresh : own
-    if (todayTotal === own && own.cost > 0) live.raise(key, own)
-    add(totals, todayTotal)
-    byStore.push(storeEntry(pair, todayTotal))
-    if (todayTotal.cost > 0) {
-      anySpend = true
-      through = Math.min(through, latest)
-    }
-  }
-  if (!anySpend) through = hourNow - 1
-
-  const running = zero()
-  const byTime = period.buckets.map((at, hour) => {
-    if (hour === hourNow) return { at, ...copy(totals) }
-    if (hour <= through) {
-      add(running, reported[hour])
-      return { at, ...copy(running) }
-    }
-    return { at, cost: null, revenue: null, orders: null }
+  const { perPair, hourly, missingCurrent, missingPrevious } = assembleRows({
+    period,
+    today,
+    pairs,
+    stored: kept.map((read) => read.values),
+    todayDaily: todayDaily.map((read) => read.rows),
+    todayHourly: todayHourly.map((read) => read.rows),
   })
 
-  // Yesterday at the same time: its whole hours so far, plus the elapsed share of this hour.
-  const previous = zero()
-  for (let hour = 0; hour < hourNow; hour++) add(previous, yesterday[hour])
-  previous.cost += yesterday[hourNow].cost * minuteShare
-  previous.revenue += yesterday[hourNow].revenue * minuteShare
-  previous.orders += yesterday[hourNow].orders * minuteShare
+  // Today's breakdown failing is reported as the report sweep's failures always were: the hours for the today
+  // view, the day's row for a longer one (whose hours card, as before, goes without).
+  const todayFailures = (single ? todayHourly : todayDaily).flatMap((read) => (read.failure ? [read.failure] : []))
+  const keptFailures = pairs.flatMap((pair, i) => (kept[i].error && kept[i].failedDays > 0 ? [{ source: pair.storeName, message: kept[i].error! }] : []))
+  const failures = dedupe([...discovery, ...todayFailures, ...keptFailures, ...live.failures])
 
-  // Yesterday's running total at each hour, for the comparison line; its last point is `previous` itself.
-  const yesterdayRunning = zero()
-  const previousByTime = period.buckets.map((_at, hour) => {
-    if (hour === hourNow) return copy(previous)
-    add(yesterdayRunning, yesterday[hour])
-    return copy(yesterdayRunning)
-  })
+  // Days some shop is still waiting on, of the view and of its comparison period. When every missing day is
+  // one whose read failed, nothing is on its way (the failure says why): the page then stops asking quickly.
+  const missing = missingCurrent.size + missingPrevious.size
+  const pending = kept.reduce((sum, read) => sum + read.pendingDays, 0)
+  const pendingDays = Math.min(missing, pending)
 
+  const series = { perPair, failures: [] }
+  const composed = settleGaps(single ? composeToday(period, series, live) : composeDays(period, series, live), period, missingCurrent, missingPrevious)
   return {
-    totals,
-    previous: series.perPair.length > 0 ? previous : null,
-    byTime,
-    previousByTime: series.perPair.length > 0 ? previousByTime : [],
-    byStore: byStore.sort((a, b) => b.cost - a.cost),
-    dataThrough: through >= 0 ? `${today} ${String(through).padStart(2, '0')}:00:00` : null,
+    currency: 'VND',
+    scope: { selected: pairs.length, total: all.length },
+    fetchedAt: new Date(live.at).toISOString(),
+    failures,
+    ...composed,
+    hours: composeHours(period, hourly, composed.totals, composed.dataThrough, missingCurrent),
+    // Read beside this one (overview.ts), so the headline is not held up by the per-product reports.
+    products: { items: [], hourly: false, total: 0, failures: [] },
+    pendingDays,
   }
 }
 
-function composeDays(period: Period, series: Series, live: Live): Composed {
-  const today = period.end
-  const buckets = new Map(period.buckets.map((at) => [at, zero()]))
-  const previousDays = daysBetween(period.previousStart, period.previousEnd)
-  const previousBuckets = new Map(previousDays.map((day) => [day, zero()]))
-  const totals = zero()
-  const previous = zero()
-  const byStore: GmvMaxOverview['byStore'] = []
-
-  for (const { pair, rows } of series.perPair) {
-    const days = new Map<string, GmvMaxTotals>()
-    for (const row of rows) {
-      const day = timeOf(row).slice(0, 10)
-      if (buckets.has(day)) addRow((days.get(day) ?? days.set(day, zero()).get(day))!, row)
-      else if (previousBuckets.has(day)) {
-        addRow(previous, row)
-        addRow(previousBuckets.get(day)!, row)
-      }
-    }
-    // Today's column follows the live total, which is normally fresher than
-    // the daily report; when the report is ahead, the live figure moves up to it.
-    const key = pairKey(pair.advertiserId, pair.storeId)
-    const fresh = live.totals.get(key)
-    const reportedToday = days.get(today)
-    if (fresh && fresh.cost >= (reportedToday?.cost ?? 0)) days.set(today, copy(fresh))
-    else if (reportedToday && reportedToday.cost > 0) live.raise(key, reportedToday)
-
-    const own = zero()
-    for (const [day, value] of days) {
-      add(buckets.get(day)!, value)
-      add(own, value)
-    }
-    add(totals, own)
-    byStore.push(storeEntry(pair, own))
-  }
-
-  return {
-    totals,
-    previous: series.perPair.length > 0 ? previous : null,
-    byTime: period.buckets.map((at) => ({ at, ...buckets.get(at)! })),
-    // Day i of the previous period sits under day i of this one.
-    previousByTime: series.perPair.length > 0 ? previousDays.map((day) => copy(previousBuckets.get(day)!)) : [],
-    byStore: byStore.sort((a, b) => b.cost - a.cost),
-    dataThrough: null,
-  }
+function dedupe(failures: Failure[]): Failure[] {
+  const seen = new Set<string>()
+  return failures.filter((failure) => {
+    const key = `${failure.source}\u0000${failure.message}`
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
 }

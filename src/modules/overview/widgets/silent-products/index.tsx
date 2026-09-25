@@ -16,6 +16,8 @@ export const silentProductsWidget: OverviewWidget = {
   band: 'insight',
   order: 30,
   sources: ['sapo'],
+  // Beside the best-sellers: half a row on a tablet, a third on a desk — the page widens
+  // whatever is left short (band-layout.ts), so two cards share the row half and half.
   size: { xs: 12, md: 6, lg: 4 },
   Component: SilentProducts,
 }

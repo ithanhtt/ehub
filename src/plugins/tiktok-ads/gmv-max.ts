@@ -37,16 +37,137 @@ const isRecord = (value: unknown): value is Row =>
  * first group, and a campaign list that silently lost an account's second page
  * to one of them would look complete.
  */
-const TRANSIENT_CODES = new Set([40100, 40132, 40133, 50000, 50002, 51305])
-const TRANSIENT_RETRIES = 3
+const RATE_LIMIT_CODES = new Set([40100, 40132, 40133])
+const TRANSIENT_CODES = new Set([...RATE_LIMIT_CODES, 50000, 50002, 51305])
+const TRANSIENT_RETRIES = 5
 
 const codeOf = (body: unknown) => (isRecord(body) && typeof body.code === 'number' ? body.code : 0)
 
-export async function sendPatiently(prepared: PreparedRequest): Promise<HttpResult> {
-  let response = await sendRequest(prepared, { maxRetries: 2 })
+/**
+ * One gate for every TikTok Business API call this server makes. TikTok's
+ * limit is per app, not per caller, and the overview alone runs several
+ * sweeps at once (series, today, hours, products, names), each four wide —
+ * sixteen and more requests together, which is what 40100 answers. So:
+ *
+ *   - at most MAX_IN_FLIGHT requests out at a time, and one started every
+ *     MIN_GAP_MS at most, whoever asks;
+ *   - when TikTok says slow down, everyone waits (the pause is shared and
+ *     doubles each time it is hit again soon), rather than each caller
+ *     retrying on its own and keeping the limit tripped;
+ *   - what a page is waiting on goes first. A request is 'interactive' unless
+ *     its caller says 'background' (a day store filling in or refreshing
+ *     kept days, the background round's warm-up): a background request
+ *     starts only while no interactive one is waiting, and at most
+ *     MAX_BACKGROUND_IN_FLIGHT of them run at once, so a long backfill always
+ *     leaves room for the page's own reads.
+ *
+ * Kept on globalThis so a dev reload does not start a second gate beside the first.
+ */
+const MAX_IN_FLIGHT = 4
+const MAX_BACKGROUND_IN_FLIGHT = 2
+const MIN_GAP_MS = 150
+const PAUSE_BASE_MS = 2_000
+const PAUSE_MAX_MS = 30_000
+
+export type RequestPriority = 'interactive' | 'background'
+
+type Gate = {
+  inFlight: number
+  backgroundInFlight: number
+  /** Waiting requests, per priority, first come first served within each. */
+  interactive: Array<() => void>
+  background: Array<() => void>
+  nextStart: number
+  pausedUntil: number
+  strikes: number
+  lastStrike: number
+}
+// V2: the gate gained priorities; a dev reload must not pick up the one-queue gate left on globalThis.
+const gate: Gate = ((globalThis as { __tiktokAdsGateV2?: Gate }).__tiktokAdsGateV2 ??= {
+  inFlight: 0,
+  backgroundInFlight: 0,
+  interactive: [],
+  background: [],
+  nextStart: 0,
+  pausedUntil: 0,
+  strikes: 0,
+  lastStrike: 0,
+})
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
+/**
+ * Hands free slots to waiting requests: interactive ones first, then
+ * background ones within their own limit. A slot is counted as taken when it
+ * is handed over, so a caller arriving meanwhile cannot take it too.
+ */
+function pump(): void {
+  while (gate.inFlight < MAX_IN_FLIGHT) {
+    const interactive = gate.interactive.shift()
+    if (interactive) {
+      gate.inFlight++
+      interactive()
+      continue
+    }
+    if (gate.background.length === 0 || gate.backgroundInFlight >= MAX_BACKGROUND_IN_FLIGHT) return
+    gate.inFlight++
+    gate.backgroundInFlight++
+    gate.background.shift()!()
+  }
+}
+
+async function acquire(priority: RequestPriority): Promise<void> {
+  await new Promise<void>((resolve) => {
+    ;(priority === 'background' ? gate.background : gate.interactive).push(resolve)
+    pump()
+  })
+  // Each start books its own slot, MIN_GAP_MS after the last one booked, and past any shared pause;
+  // a pause begun while it waited sends it round again.
+  for (;;) {
+    const now = Date.now()
+    const start = Math.max(now, gate.pausedUntil, gate.nextStart)
+    gate.nextStart = start + MIN_GAP_MS
+    if (start <= now) return
+    await sleep(start - now)
+    if (gate.pausedUntil <= Date.now()) return
+  }
+}
+
+function release(priority: RequestPriority): void {
+  gate.inFlight--
+  if (priority === 'background') gate.backgroundInFlight--
+  pump()
+}
+
+/** TikTok said slow down: pause every caller, longer when it keeps saying so. */
+function strike(): void {
+  const now = Date.now()
+  // A refusal of a request sent before the pause began is the same slowdown, not a new one.
+  if (gate.pausedUntil > now) return
+  gate.strikes = now - gate.lastStrike < 60_000 ? gate.strikes + 1 : 1
+  gate.lastStrike = now
+  const pause = Math.min(PAUSE_MAX_MS, PAUSE_BASE_MS * 2 ** (gate.strikes - 1))
+  gate.pausedUntil = now + pause
+}
+
+async function sendGated(prepared: PreparedRequest, priority: RequestPriority): Promise<HttpResult> {
+  await acquire(priority)
+  try {
+    // One transport retry: the slow retries (rate limits) are sendPatiently's, outside the gate.
+    return await sendRequest(prepared, { maxRetries: 1, timeoutMs: 30_000 })
+  } finally {
+    release(priority)
+  }
+}
+
+/** Sends through the gate, waiting out TikTok's rate limits and transient failures. `priority` defaults to 'interactive'. */
+export async function sendPatiently(prepared: PreparedRequest, options: { priority?: RequestPriority } = {}): Promise<HttpResult> {
+  const priority = options.priority ?? 'interactive'
+  let response = await sendGated(prepared, priority)
   for (let attempt = 1; attempt <= TRANSIENT_RETRIES && TRANSIENT_CODES.has(codeOf(response.data)); attempt++) {
-    await new Promise((resolve) => setTimeout(resolve, 1_000 * attempt))
-    response = await sendRequest(prepared, { maxRetries: 2 })
+    if (RATE_LIMIT_CODES.has(codeOf(response.data))) strike()
+    else await sleep(1_000 * attempt)
+    response = await sendGated(prepared, priority)
   }
   return response
 }

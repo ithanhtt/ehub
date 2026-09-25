@@ -1,7 +1,8 @@
 import 'server-only'
 
 import { randomBytes } from 'node:crypto'
-import { mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { writeFileAtomic } from '@/core/utils/atomic-write'
 import path from 'node:path'
 import type { PendingUpdate, UpdateRecord, UpdateStatus } from '../types'
 
@@ -36,9 +37,7 @@ async function readJson<T>(file: string): Promise<T | null> {
 
 async function writeJson(file: string, value: unknown) {
   await mkdir(path.dirname(file), { recursive: true })
-  const temp = `${file}.${process.pid}.tmp`
-  await writeFile(temp, JSON.stringify(value, null, 2), 'utf8')
-  await rename(temp, file)
+  await writeFileAtomic(file, JSON.stringify(value, null, 2))
 }
 
 const pendingFiles = (id: string) => ({

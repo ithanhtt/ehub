@@ -2,7 +2,7 @@ import { index, pgTable, text, timestamp, uniqueIndex } from 'drizzle-orm/pg-cor
 import { user } from './auth'
 
 /** Role a member holds inside one project. Ordered from most to least power. */
-export type ProjectRole = 'owner' | 'admin' | 'editor' | 'viewer'
+export type ProjectRole = 'owner' | 'admin' | 'editor' | 'booker' | 'viewer'
 
 export const projects = pgTable(
   'projects',

@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 
 /**
  * Shared pieces of the dashboard's hand-built SVG charts: scale ticks, the
@@ -109,4 +109,49 @@ export function useWidth<T extends HTMLElement>() {
     return () => observer.disconnect()
   }, [])
   return [ref, width] as const
+}
+
+/**
+ * Where a chart's floating tooltip sits beside the point at `x`: on whichever
+ * side has room for `size`, else across the whole chart — a narrow card on a
+ * phone — so the card's edge never cuts it off.
+ */
+export function tipPlacement(x: number, gap: number, width: number, size: number): { left?: number; right?: number } {
+  if (x + gap + size <= width) return { left: x + gap }
+  if (x - gap - size >= 0) return { right: width - x + gap }
+  return { left: 4, right: 4 }
+}
+
+/**
+ * Pointer handling for a chart read by hover or by tap. A mouse shows the
+ * point under it while it hovers. A finger shows the point it tapped until the
+ * next tap or a tap elsewhere: touch has no hover, and lifting the finger
+ * fires pointerleave, which would hide the point at once. Keyboard focus
+ * (and only that) starts on `onKeyboardFocus`'s point.
+ */
+export function useChartPointer<T>(
+  setActive: (value: T | null) => void,
+  pick: (event: ReactPointerEvent<SVGSVGElement>) => T | null,
+  onKeyboardFocus?: () => void,
+) {
+  const touch = useRef(false)
+  return {
+    onPointerDown: (event: ReactPointerEvent<SVGSVGElement>) => {
+      touch.current = event.pointerType !== 'mouse'
+      setActive(pick(event))
+    },
+    onPointerMove: (event: ReactPointerEvent<SVGSVGElement>) => {
+      if (event.pointerType === 'mouse' || event.buttons > 0) setActive(pick(event))
+    },
+    onPointerLeave: (event: ReactPointerEvent<SVGSVGElement>) => {
+      if (event.pointerType === 'mouse') setActive(null)
+    },
+    onFocus: () => {
+      if (!touch.current) onKeyboardFocus?.()
+    },
+    onBlur: () => {
+      touch.current = false
+      setActive(null)
+    },
+  }
 }

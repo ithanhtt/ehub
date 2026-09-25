@@ -21,10 +21,12 @@ import Typography from '@mui/material/Typography'
 import SearchOutlined from '@mui/icons-material/SearchOutlined'
 import WarningAmberOutlined from '@mui/icons-material/WarningAmberOutlined'
 import { SyncChip } from '@/components/charts/sync-chip'
+import { TipContent } from '@/components/charts/chart-tooltip'
 import { TableScroll } from '@/components/ui/table-scroll'
 import { usePreference } from '@/components/ui/use-preference'
 import { formatCompact, formatMoney, formatNumber } from '@/core/utils/format'
 import type { SapoProducts, SapoTotals } from '@/modules/overview/data/types'
+import { acceptView, BarList, PartsLegend, ShareBar, StatRow, ViewToggle, type DetailView } from '../../shared/bars'
 import { DetailsDialog, InsightCard } from '../../shared/insight-card'
 import { fold, useDuration } from '../../shared/text'
 
@@ -46,6 +48,14 @@ import { fold, useDuration } from '../../shared/text'
  */
 
 const ORDERS = 'var(--adshub-series-3)'
+/** The cancelled part of a product's bar. */
+const CANCELLED = 'color-mix(in srgb, var(--mui-palette-error-main) 55%, transparent)'
+/** The five leaders, each a shade lighter than the one before; the rest grey. */
+const leaderShade = (i: number) => `color-mix(in srgb, ${ORDERS} ${100 - i * 16}%, transparent)`
+/** Products the full view's chart ranks. */
+const CHART_ROWS = 15
+/** The share of the whole the "make up 80%" figure counts to. */
+const PARETO = 0.8
 const TOP = 5
 const PAGE = 20
 
@@ -104,6 +114,21 @@ function rank(items: Item[], key: Sort['key'], dir: Sort['dir'] = 'desc'): Item[
       key === 'name' ? a.name.localeCompare(b.name, 'vi', { sensitivity: 'base' }) : valueOf(a, key) - valueOf(b, key)
     return sign * primary || b.orders - a.orders || b.last - a.last
   })
+}
+
+/** Every product's figure for the measure, added up: what a product's share is of. */
+const totalOf = (items: Item[], measure: Measure) => items.reduce((sum, item) => sum + valueOf(item, measure), 0)
+
+/** How many of the ranked products it takes to reach `share` of the total. */
+function productsToReach(ranked: Item[], measure: Measure, share: number): number {
+  const total = totalOf(ranked, measure)
+  if (total <= 0) return 0
+  let running = 0
+  for (const [i, item] of ranked.entries()) {
+    running += valueOf(item, measure)
+    if (running >= total * share) return i + 1
+  }
+  return ranked.length
 }
 
 /** The way a column sorts when first chosen: names A→Z, figures highest first. */
@@ -176,29 +201,19 @@ function HighCancelIcon({ item, figures }: { item: Item; figures: Figures }) {
 /** Everything known about one product, for the hover on its bar. */
 function ItemTip({ item, figures }: { item: Item; figures: Figures }) {
   const t = useTranslations('dashboard')
-  const lines = [
-    t('topTipOrders', { orders: figures.count(item.orders), share: figures.percent(figures.share(item)) }),
-    t('topTipQuantity', { quantity: figures.count(item.quantity) }),
-    t('topTipGmv', { gmv: figures.exact(item.gmv) }),
-    t('topTipCancelled', { cancelled: figures.count(item.cancelled), rate: figures.percent(cancelRate(item)) }),
-    t('topTipNet', { net: figures.exact(netOf(item)) }),
-  ]
   return (
-    <Box sx={{ py: 0.25 }}>
-      <Typography variant="caption" sx={{ display: 'block', fontWeight: 700, mb: 0.25 }}>
-        {item.name}
-      </Typography>
-      {lines.map((line) => (
-        <Typography key={line} variant="caption" sx={{ display: 'block' }}>
-          {line}
-        </Typography>
-      ))}
-      {highCancel(item, figures.storeRate) ? (
-        <Typography variant="caption" sx={{ display: 'block', fontWeight: 700, mt: 0.25 }}>
-          {t('topHighCancel', { rate: figures.percent(cancelRate(item)), store: figures.storePercent })}
-        </Typography>
-      ) : null}
-    </Box>
+    <TipContent
+      title={item.name}
+      rows={[
+        { key: 'orders', label: t('topTip.orders'), value: figures.count(item.orders) },
+        { key: 'share', label: t('topTip.share'), value: figures.percent(figures.share(item)) },
+        { key: 'quantity', label: t('topTip.quantity'), value: figures.count(item.quantity) },
+        { key: 'gmv', label: t('topTip.gmv'), value: figures.exact(item.gmv) },
+        { key: 'cancelled', label: t('topTip.cancelled'), value: `${figures.count(item.cancelled)} · ${figures.percent(cancelRate(item))}` },
+        { key: 'net', label: t('topTip.net'), value: figures.exact(netOf(item)), strong: true },
+      ]}
+      notes={[highCancel(item, figures.storeRate) ? t('topHighCancel', { rate: figures.percent(cancelRate(item)), store: figures.storePercent }) : null]}
+    />
   )
 }
 
@@ -212,8 +227,8 @@ function TopFive({ items, measure, figures }: { items: Item[]; measure: Measure;
   const max = Math.max(0, ...items.map((item) => valueOf(item, measure))) || 1
   const first: 'orders' | 'quantity' = measure === 'quantity' ? 'quantity' : 'orders'
   const weight = (key: SortKey) => (measure === key ? 700 : 400)
-  const heading = (label: string, tip: string, key: SortKey) => (
-    <TableCell align="right" sx={{ fontWeight: weight(key) }}>
+  const heading = (label: string, tip: string, key: SortKey, wideOnly = false) => (
+    <TableCell align="right" sx={{ fontWeight: weight(key), ...(wideOnly ? WIDE_ONLY : null) }}>
       <Tooltip title={tip} placement="top" describeChild>
         <Box component="span" sx={HELP}>
           {label}
@@ -241,17 +256,22 @@ function TopFive({ items, measure, figures }: { items: Item[]; measure: Measure;
             ? heading(t('topColOrders'), t('topDefOrders'), 'orders')
             : heading(t('topColQuantity'), t('topDefQuantity'), 'quantity')}
           {heading(t('topColGmv'), t('topDefGmv'), 'gmv')}
-          {heading(t('topColNet'), t('topDefNet'), 'net')}
+          {/* On a phone the name needs the room: GMV without cancellations waits in the full list. */}
+          {heading(t('topColNet'), t('topDefNet'), 'net', true)}
         </TableRow>
       </TableHead>
       <TableBody>
         {items.map((item) => (
           <Tooltip key={item.key} title={<ItemTip item={item} figures={figures} />} placement="top-start">
             <TableRow hover tabIndex={0} sx={{ outline: 'none', '&:focus-visible': { backgroundColor: 'action.hover' } }}>
-              {/* Takes the room the figures leave; a long name keeps to one line, cut with an ellipsis (whole in the row's hover). */}
+              {/* Takes the room the figures leave; a long name runs to two lines rather than being cut to a few letters. */}
               <TableCell sx={{ width: '100%', maxWidth: 0 }}>
-                <Stack direction="row" spacing={0.5} sx={{ alignItems: 'center', minWidth: 0 }}>
-                  <Typography variant="body2" noWrap sx={{ fontWeight: 600, minWidth: 0 }}>
+                <Stack direction="row" spacing={0.5} sx={{ alignItems: 'flex-start', minWidth: 0 }}>
+                  <Typography
+                    variant="body2"
+                    title={item.name}
+                    sx={{ fontWeight: 600, minWidth: 0, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden', wordBreak: 'break-word', lineHeight: 1.35 }}
+                  >
                     {item.name}
                   </Typography>
                   {highCancel(item, figures.storeRate) ? <HighCancelIcon item={item} figures={figures} /> : null}
@@ -274,12 +294,115 @@ function TopFive({ items, measure, figures }: { items: Item[]; measure: Measure;
               <TableCell align="right" sx={{ fontWeight: weight('gmv') }}>
                 {figures.money(item.gmv)}
               </TableCell>
-              <TableCell align="right">{figures.money(netOf(item))}</TableCell>
+              <TableCell align="right" sx={WIDE_ONLY}>
+                {figures.money(netOf(item))}
+              </TableCell>
             </TableRow>
           </Tooltip>
         ))}
       </TableBody>
     </Table>
+  )
+}
+
+/** How much of the whole the five leaders take: one line, one bar — each leader a part, the rest grey. */
+function LeadersShare({ ranked, measure, figures }: { ranked: Item[]; measure: Measure; figures: Figures }) {
+  const t = useTranslations('dashboard')
+  const total = totalOf(ranked, measure)
+  if (total <= 0) return null
+  const leaders = ranked.slice(0, TOP)
+  const leading = totalOf(leaders, measure)
+  const show = (value: number) => (measure === 'gmv' ? figures.money(value) : figures.count(value))
+  return (
+    <Box sx={{ mb: 1.5 }}>
+      <Typography variant="caption" sx={{ display: 'block', color: 'text.secondary', mb: 0.75 }}>
+        {t.rich('topConcentration', {
+          count: leaders.length,
+          share: figures.percent(leading / total),
+          measure: t(`topMeasureNoun.${measure}`),
+          b: (chunks) => (
+            <Box component="strong" sx={{ color: 'text.primary' }}>
+              {chunks}
+            </Box>
+          ),
+        })}
+      </Typography>
+      <ShareBar
+        legend={false}
+        height={10}
+        segments={[
+          ...leaders.map((item, i) => ({ key: item.key, label: item.name, value: valueOf(item, measure), color: leaderShade(i), tip: `${item.name}: ${show(valueOf(item, measure))} (${figures.percent(valueOf(item, measure) / total)})` })),
+          { key: 'others', label: t('topOthers', { count: ranked.length - leaders.length }), value: total - leading, color: 'action.selected', tip: `${t('topOthers', { count: ranked.length - leaders.length })}: ${show(total - leading)} (${figures.percent((total - leading) / total)})` },
+        ]}
+      />
+    </Box>
+  )
+}
+
+/**
+ * The full view's chart: how concentrated the sales are (figures up top), then
+ * the leading products as bars — each split into its kept and cancelled part,
+ * with its share and the running share — every figure of a product on hover.
+ */
+function TopProductsChart({ items, measure, figures }: { items: Item[]; measure: Measure; figures: Figures }) {
+  const t = useTranslations('dashboard')
+  const ranked = rank(items, measure)
+  const total = totalOf(ranked, measure)
+  const shown = ranked.slice(0, CHART_ROWS)
+  const leaders = ranked.slice(0, TOP)
+  const pareto = productsToReach(ranked, measure, PARETO)
+  const show = (value: number) => (measure === 'gmv' ? figures.money(value) : figures.count(value))
+  const noun = t(`topMeasureNoun.${measure}`)
+  let running = 0
+  const rows = shown.map((item, i) => {
+    const value = valueOf(item, measure)
+    running += value
+    const parts =
+      measure === 'orders'
+        ? [{ value: item.orders - item.cancelled, color: ORDERS }, { value: item.cancelled, color: CANCELLED }]
+        : measure === 'gmv'
+          ? [{ value: netOf(item), color: ORDERS }, { value: item.cancelledGmv, color: CANCELLED }]
+          : [{ value: item.quantity, color: ORDERS }]
+    return {
+      key: item.key,
+      label: item.name,
+      valueText: show(value),
+      sub: t('topBarSub', { share: figures.percent(total > 0 ? value / total : 0), cumulative: figures.percent(total > 0 ? running / total : 0) }),
+      parts,
+      tip: <ItemTip item={item} figures={figures} />,
+      strong: i < 3 || highCancel(item, figures.storeRate),
+    }
+  })
+  return (
+    <Box sx={{ flex: '1 1 auto', overflowY: 'auto', minHeight: 0, pr: 0.5 }}>
+      <StatRow
+        items={[
+          { key: 'products', label: t('topStatProducts'), value: figures.count(ranked.length) },
+          { key: 'top', label: t('topStatTop', { count: leaders.length }), value: figures.percent(total > 0 ? totalOf(leaders, measure) / total : 0), note: noun },
+          {
+            key: 'pareto',
+            label: t('topStatPareto', { measure: noun }),
+            value: t('topStatParetoValue', { count: pareto }),
+            note: t('topStatParetoNote', { share: figures.percent(ranked.length > 0 ? pareto / ranked.length : 0) }),
+          },
+          { key: 'cancel', label: t('topStatCancel'), value: figures.storePercent },
+        ]}
+      />
+      <Stack direction="row" useFlexGap sx={{ alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 1, mt: 2.5, mb: 1.5 }}>
+        <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
+          {t('topChartTitle', { count: shown.length, measure: noun })}
+        </Typography>
+        {measure === 'quantity' ? null : (
+          <PartsLegend
+            parts={[
+              { label: t('topPartKept'), color: ORDERS },
+              { label: t('topPartCancelled'), color: CANCELLED },
+            ]}
+          />
+        )}
+      </Stack>
+      <BarList rows={rows} rank />
+    </Box>
   )
 }
 
@@ -321,7 +444,10 @@ export function TopProductsSummary({
             {syncing ? t('silentSyncing', { count: products.pendingDays }) : t('topEmpty', { period: periodLabel })}
           </Typography>
         ) : (
-          <TopFive items={ranked.slice(0, TOP)} measure={measure} figures={figures} />
+          <>
+            {ranked.length > TOP ? <LeadersShare ranked={ranked} measure={measure} figures={figures} /> : null}
+            <TopFive items={ranked.slice(0, TOP)} measure={measure} figures={figures} />
+          </>
         )}
         {ranked.length > TOP ? (
           <Typography variant="caption" sx={{ display: 'block', color: 'text.secondary', mt: 1 }}>
@@ -368,6 +494,7 @@ function TopProductsTable({
   const [saved, setSort] = usePreference<Sort | null>('adshub.top.sort', null, acceptSort)
   const sort: Sort = saved ?? { key: measure, dir: 'desc' }
   const [limit, setLimit] = useState(PAGE)
+  const [view, setView] = usePreference<DetailView>('adshub.top.view', 'chart', acceptView)
   const at = new Intl.DateTimeFormat(locale === 'vi' ? 'vi-VN' : 'en-GB', {
     hour: '2-digit',
     minute: '2-digit',
@@ -424,14 +551,17 @@ function TopProductsTable({
       </Typography>
 
       <Stack direction="row" sx={{ alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 1.5, mb: 1.5 }}>
-        <MeasureToggle
-          measure={measure}
-          onChange={(next) => {
-            onMeasureChange(next)
-            setSort({ key: next, dir: 'desc' })
-            setLimit(PAGE)
-          }}
-        />
+        <Stack direction="row" useFlexGap sx={{ alignItems: 'center', flexWrap: 'wrap', gap: 1.5 }}>
+          <ViewToggle view={view} onChange={setView} />
+          <MeasureToggle
+            measure={measure}
+            onChange={(next) => {
+              onMeasureChange(next)
+              setSort({ key: next, dir: 'desc' })
+              setLimit(PAGE)
+            }}
+          />
+        </Stack>
         <TextField
           size="small"
           value={query}
@@ -454,6 +584,16 @@ function TopProductsTable({
         />
       </Stack>
 
+      {view === 'chart' && products.items.length > 0 ? (
+        matching.length === 0 ? (
+          <Typography variant="body2" sx={{ color: 'text.secondary', py: 4, textAlign: 'center' }}>
+            {t('silentNoMatch')}
+          </Typography>
+        ) : (
+          <TopProductsChart items={matching} measure={measure} figures={figures} />
+        )
+      ) : (
+        <>
       <Typography variant="body2" sx={{ fontWeight: 600, mb: 1 }}>
         {t('topSummary', { count: products.items.length, period: periodLabel })}
       </Typography>
@@ -593,6 +733,9 @@ function TopProductsTable({
           </Button>
         </Box>
       ) : null}
+
+        </>
+      )}
 
       {products.pendingDays > 0 ? (
         <Typography variant="caption" sx={{ display: 'block', color: 'text.disabled', mt: 1 }}>

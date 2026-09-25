@@ -1,4 +1,5 @@
 import { NextResponse, type NextRequest } from 'next/server'
+import { redactSecrets } from '@/core/plugins/http'
 import { assertCapability } from '@/core/auth/session'
 import { dashboardSources } from '@/modules/overview/data/overview'
 
@@ -18,6 +19,8 @@ export async function GET(_request: NextRequest, { params }: { params: Promise<{
   try {
     return NextResponse.json(await dashboardSources(projectId), { headers: { 'Cache-Control': 'no-store' } })
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 })
+    // The detail stays in the server log (secrets masked); the page gets a code, not a provider's raw message.
+    console.error('[api/dashboard/sources]', redactSecrets(error instanceof Error ? (error.stack ?? error.message) : String(error)))
+    return NextResponse.json({ error: 'INTERNAL' }, { status: 500 })
   }
 }

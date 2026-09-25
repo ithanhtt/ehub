@@ -6,6 +6,7 @@ import { PreferencesProvider } from '@/components/ui/use-preference'
 import { can } from '@/core/auth/rbac'
 import { requireProject } from '@/core/auth/session'
 import { listConnections } from '@/features/connections/queries'
+import { hiddenDashboardPlugins } from '@/modules/overview/data/overview'
 import { OverviewDashboard } from '@/modules/overview/shell/overview-page'
 import { titled } from '@/core/metadata'
 
@@ -31,7 +32,7 @@ export const generateMetadata = titled('nav', 'overview')
 export default async function ProjectOverviewPage({ params }: { params: Promise<{ projectId: string }> }) {
   const { projectId } = await params
   const { project, role } = await requireProject(projectId)
-  const connections = await listConnections(projectId)
+  const [connections, hidden] = await Promise.all([listConnections(projectId), hiddenDashboardPlugins(projectId)])
   const usable = connections.filter((c) => !c.orphaned)
   const preferences = parsePreferences((await cookies()).get(PREFERENCES_COOKIE)?.value)
 
@@ -43,6 +44,7 @@ export default async function ProjectOverviewPage({ params }: { params: Promise<
       <OverviewDashboard
         projectId={projectId}
         connected={usable.map((c) => c.pluginId)}
+        hidden={hidden}
         canConfigure={can(role, 'connection:update')}
       />
     </PreferencesProvider>

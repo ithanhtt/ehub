@@ -23,6 +23,43 @@ export interface GmvMaxTotals {
   orders: number
 }
 
+/**
+ * GMV Max by hour of the day (0–23, Vietnam time), over exactly the view's
+ * days — what an ads reviewer reads to move budget to the hours that pay.
+ */
+export interface GmvMaxHours {
+  /**
+   * The today view: each hour's own spend, revenue and orders; null for an
+   * hour TikTok has not broken down yet, and for hours ahead. The longer
+   * views: the average per day for each hour, today joining only for the
+   * hours it has finished.
+   */
+  values: Array<GmvMaxTotals | null>
+  /** The same summed over the view's days, and how many days are behind each hour. */
+  totals: GmvMaxTotals[]
+  counts: number[]
+  /** The hour now, when today is one of the view's days. */
+  currentHour: number | null
+}
+
+/** GMV Max per product (item_group_id) over the view's days, spend first. */
+export interface GmvMaxProducts {
+  items: Array<{
+    id: string
+    name: string
+    totals: GmvMaxTotals
+    /** Summed per hour of the day over the view's days; null when TikTok gave the days only. */
+    hours: GmvMaxTotals[] | null
+  }>
+  /** TikTok broke the products down by hour (else `hours` is null throughout). */
+  hourly: boolean
+  /** Products that spent in the view — `items` holds the top ones only. */
+  total: number
+  failures: Failure[]
+  /** Still being read (a long report, a throttled TikTok): the next refresh brings them. */
+  pending?: boolean
+}
+
 export interface GmvMaxOverview {
   currency: string
   totals: GmvMaxTotals
@@ -42,11 +79,21 @@ export interface GmvMaxOverview {
   byStore: Array<GmvMaxTotals & { storeId: string; storeName: string; advertiserName: string }>
   /** Latest hour TikTok has reported spend for (today view only) — its reporting lags by about an hour. */
   dataThrough: string | null
+  hours: GmvMaxHours
+  /** Filled in beside the rest (see overview.ts): GMV Max per product, with its hours when TikTok gives them. */
+  products: GmvMaxProducts
   /** Shops counted, out of all the connection can report GMV Max for. */
   scope: { selected: number; total: number }
   /** When these figures were read from TikTok. */
   fetchedAt: string
   failures: Failure[]
+  /**
+   * Days of this view and of its comparison period that some shop has nothing
+   * kept for yet, being read in the background (gmv-max.ts). While above zero
+   * the totals are short, those days are gaps in `byTime`, and `previous` is
+   * null when they belong to the comparison period. Absent: nothing pending.
+   */
+  pendingDays?: number
 }
 
 /**
@@ -89,9 +136,9 @@ export interface SapoTotals {
 }
 
 /**
- * When in the day orders come in: Sapo orders created, by hour of the day
- * (0–23, Vietnam time), over exactly the view's days — the same days as every
- * other figure on the page.
+ * When in the day orders come in: Sapo orders created and their sales, by
+ * hour of the day (0–23, Vietnam time), over exactly the view's days — the
+ * same days as every other figure on the page (the hourly card reads it).
  */
 export interface SapoHours {
   /**
@@ -100,17 +147,13 @@ export interface SapoHours {
    * day for each hour, today joining only for the hours it has finished.
    */
   profile: Array<number | null>
-  /** Orders in each hour over the view's days, and how many days are behind each hour. */
-  totals: number[]
-  counts: number[]
-  /** The previous period of the same length, figured the same way: yesterday's hours, or the previous 7/30 days' average. null until synced. */
-  previous: number[] | null
-  /** The longer views' weekday rows, Monday first: the average per day for each hour, and the days behind it. Empty for today. */
-  week: Array<{ weekday: number; hours: Array<number | null>; counts: number[] }>
+  /**
+   * Sales by the hour placed — the orders' value less the cancelled ones —
+   * figured like `profile`: today's own hours, or the average per day.
+   */
+  revenue: Array<number | null>
   /** The hour now, when today is one of the view's days. */
   currentHour: number | null
-  /** Synced days of the view. */
-  days: number
 }
 
 /** The products sold over the view's days, for the best-sellers card and the "no new orders for a while" list. */
@@ -131,6 +174,14 @@ export interface SapoProducts {
     gmv: number
     cancelledGmv: number
     last: number
+    /** Its orders by the hour placed (Vietnam time), summed over the view's days; null for days synced before hours were kept. */
+    hours: number[] | null
+    /**
+     * Its sales by the hour placed — its lines' value less the cancelled
+     * orders', summed like `hours`. null until every day of the view has been
+     * read with it (days kept from before are read again for it, behind).
+     */
+    hourSales: number[] | null
   }>
   /** Start of the view's first day, epoch ms: the span the usual order rate is taken over. */
   since: number
@@ -197,20 +248,81 @@ export interface SapoOverview {
   failures: Failure[]
 }
 
+/** Orders placed and their value (net: cancelled ones taken out). */
+export interface ShopFigures {
+  orders: number
+  cancelled: number
+  gmv: number
+  /** gmv less the cancelled orders' value. */
+  net: number
+}
+
+/**
+ * The TikTok Shop's own orders on the overview — its sales, hour by hour,
+ * beside what GMV Max spent and what Sapo sold. Read from the orders API
+ * (orders placed, by the hour placed, Vietnam time).
+ */
+export interface TiktokShopOverview {
+  totals: ShopFigures
+  /** The same for the period before, for the changes: today against yesterday up to the same hour. null until those days are read. */
+  previous: ShopFigures | null
+  /** Net sales over the view, for a trend line: today, running up hour by hour to now; longer views, day by day (null: not read yet). */
+  byTime: Array<number | null>
+  hours: {
+    /** Today: each hour's own; hours ahead null. Longer views: the average per day, today joining for its finished hours. */
+    values: Array<ShopFigures | null>
+    totals: ShopFigures[]
+    counts: number[]
+    currentHour: number | null
+  }
+  /** Products sold in the view — `products` holds the top ones only. */
+  productCount: number
+  /** Products by net sales over the view's days, with their orders and net sales per hour of the day (summed). */
+  products: Array<{ id: string; name: string; totals: ShopFigures; hours: Array<{ orders: number; net: number }> }>
+  /**
+   * Refunds TikTok completed on the view's orders (return/refund requests, by
+   * the day the order was placed; cancelled orders left out — see
+   * ShopOrderDay.refunded). Apart from `net`, which it is not taken off.
+   * null: not known for every day of the view (no return/refund scope, or not
+   * read yet); absent from an overview built before it existed.
+   */
+  refunded?: { amount: number; orders: number } | null
+  /** Days of the view still being read. */
+  pendingDays: number
+  fetchedAt: string
+  failures: Failure[]
+}
+
 /** What the "choose data sources" dialog offers, and what is chosen now. */
 export interface DashboardSources {
   tiktok: {
     connectionId: string
     connectionName: string
+    /** The connection's last test: 'connected', 'error', 'expired' or 'draft'. */
+    status: string
+    /** Left off the overview (see selection.ts). */
+    hidden: boolean
     shops: Array<{ key: string; advertiserId: string; advertiserName: string; storeId: string; storeName: string }>
     /** Ad accounts the token reaches that run no GMV Max shop, so have nothing to choose. */
     accountsWithoutShops: number
     selected: string[] | null
     failures: Failure[]
   } | null
+  /** The TikTok Shop connection: the shops its app is authorised for, and the one the project reads. */
+  tiktokShop: {
+    connectionId: string
+    connectionName: string
+    status: string
+    hidden: boolean
+    shops: Array<{ cipher: string; name: string; region: string }>
+    /** The shop read now (its cipher); null when none is known yet (the connection was never tested). */
+    selected: string | null
+  } | null
   sapo: {
     connectionId: string
     connectionName: string
+    status: string
+    hidden: boolean
     /** Channels seen in the synced days, busiest first, with their orders over 30 days. */
     channels: Array<{ name: string; orders: number }>
     selected: string[] | null
@@ -224,5 +336,6 @@ export interface DashboardData {
   generatedAt: string
   /** null when the project has no connection of that kind. */
   gmvMax: GmvMaxOverview | null
+  tiktokShop: TiktokShopOverview | null
   sapo: SapoOverview | null
 }

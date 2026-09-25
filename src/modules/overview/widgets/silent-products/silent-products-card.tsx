@@ -29,6 +29,7 @@ import type { SapoCatalog, SapoProducts } from '@/modules/overview/data/types'
 import { SyncChip } from '@/components/charts/sync-chip'
 import { TableScroll } from '@/components/ui/table-scroll'
 import { usePreference } from '@/components/ui/use-preference'
+import { acceptView, BarList, PartsLegend, ShareBar, ViewToggle, type DetailView, type Segment } from '../../shared/bars'
 import { DetailsDialog, InsightCard } from '../../shared/insight-card'
 import { fold, useDuration } from '../../shared/text'
 
@@ -158,13 +159,15 @@ function useCatalog(projectId: string, enabled: boolean) {
 function productRows(products: SapoProducts, catalog: SapoCatalog | null, asOf: number, minutes: number): Row[] {
   const elapsedHours = Math.max(1 / 60, (asOf - products.since) / 3_600_000)
   const sold = new Map(products.items.map((item) => [item.key, item]))
+  // A set, not a scan per product: this runs every second, over catalogs of thousands.
+  const listed = new Set(catalog?.items.map((product) => product.key) ?? [])
   const base: Array<{ key: string; name: string; orders: number; last: number | null }> = catalog
     ? [
         ...catalog.items.map((product) => {
           const inPeriod = sold.get(product.key)
           return inPeriod ?? { key: product.key, name: product.name, orders: 0, last: products.until === null ? product.last : null }
         }),
-        ...products.items.filter((item) => !catalog.items.some((product) => product.key === item.key)),
+        ...products.items.filter((item) => !listed.has(item.key)),
       ]
     : products.items
   return base.map((item) => {
@@ -218,6 +221,122 @@ function sortRows(rows: Row[], sort: Sort): Row[] {
             : compare(a.expected, b.expected)
     return sign * primary || compare(b.silentMs, a.silentMs)
   })
+}
+
+/** The colours of a product's state: flagged, quiet, never ordered, recent. */
+const STATE_COLOR = {
+  unusual: 'warning.main',
+  quiet: 'color-mix(in srgb, var(--mui-palette-warning-main) 40%, transparent)',
+  never: 'text.disabled',
+  recent: 'color-mix(in srgb, var(--mui-palette-success-main) 70%, transparent)',
+} as const
+type State = keyof typeof STATE_COLOR
+const stateOf = (row: Row): State => (!row.quiet ? 'recent' : row.last === null ? 'never' : row.expected >= UNUSUAL ? 'unusual' : 'quiet')
+
+/** The rows counted by state, the ones that need a look first. */
+function useStateSegments(rows: Row[]): Segment[] {
+  const t = useTranslations('dashboard')
+  const counts: Record<State, number> = { unusual: 0, quiet: 0, never: 0, recent: 0 }
+  for (const row of rows) counts[stateOf(row)] += 1
+  const order: State[] = ['unusual', 'quiet', 'never', 'recent']
+  // A state no product is in stays out of the legend, except the two every reader looks for.
+  return order
+    .filter((state) => counts[state] > 0 || state === 'quiet' || state === 'recent')
+    .map((state) => ({ key: state, label: t(`silentSeg.${state}`), value: counts[state], color: STATE_COLOR[state] }))
+}
+
+/** How long since the last order, in the steps a reader thinks in (minutes). */
+const BUCKETS = [60, 180, 360, 720, 1440, 4320]
+
+/**
+ * The full view's chart: the products by state; then how long each has gone
+ * without an order, step by step (each step split by state); and the most
+ * unusually quiet, ranked by the orders they would usually have had.
+ */
+function SilentChart({
+  rows,
+  quiet,
+  windowLabel,
+  since,
+  approx,
+}: {
+  rows: Row[]
+  quiet: Row[]
+  windowLabel: string
+  since: (row: Row) => string
+  approx: (value: number) => string
+}) {
+  const t = useTranslations('dashboard')
+  const locale = useLocale()
+  const duration = useDuration()
+  const count = (value: number) => formatNumber(value, locale)
+  const segments = useStateSegments(rows)
+
+  const steps = [
+    ...BUCKETS.map((upTo, i) => ({
+      key: String(upTo),
+      label: i === 0 ? `< ${duration(upTo * 60_000)}` : `${duration(BUCKETS[i - 1] * 60_000)} – ${duration(upTo * 60_000)}`,
+      within: (row: Row) => row.last !== null && row.silentMs < upTo * 60_000 && (i === 0 || row.silentMs >= BUCKETS[i - 1] * 60_000),
+    })),
+    { key: 'longer', label: `> ${duration(BUCKETS[BUCKETS.length - 1] * 60_000)}`, within: (row: Row) => row.last !== null && row.silentMs >= BUCKETS[BUCKETS.length - 1] * 60_000 },
+    { key: 'never', label: t('silentBucketNever'), within: (row: Row) => row.last === null },
+  ]
+  const stepRows = steps
+    .map((step) => {
+      const members = rows.filter(step.within)
+      const by = (state: State) => members.filter((row) => stateOf(row) === state).length
+      return {
+        key: step.key,
+        label: step.label,
+        valueText: count(members.length),
+        parts: (['unusual', 'quiet', 'never', 'recent'] as State[]).map((state) => ({ value: by(state), color: STATE_COLOR[state] })),
+        total: members.length,
+      }
+    })
+    // The never-ordered step only where there are such products.
+    .filter((step) => step.key !== 'never' || step.total > 0)
+
+  const flagged = [...quiet].filter((row) => row.expected > 0).sort((a, b) => b.expected - a.expected).slice(0, 10)
+  const flaggedRows = flagged.map((row) => ({
+    key: row.key,
+    label: row.name,
+    valueText: t('silentExpectedOrders', { expected: approx(row.expected) }),
+    sub: t('silentUnusualSub', { since: since(row), orders: count(row.orders) }),
+    parts: [{ value: row.expected, color: row.expected >= UNUSUAL ? STATE_COLOR.unusual : STATE_COLOR.quiet }],
+    strong: row.expected >= UNUSUAL,
+  }))
+
+  return (
+    <Box sx={{ flex: '1 1 auto', overflowY: 'auto', minHeight: 0, pr: 0.5 }}>
+      <ShareBar segments={segments} height={14} format={count} />
+      <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: '1fr 1fr' }, gap: { xs: 3, md: 4 }, mt: 3 }}>
+        <Box sx={{ minWidth: 0 }}>
+          <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 0.5 }}>
+            {t('silentBucketsTitle')}
+          </Typography>
+          <Box sx={{ mb: 1.5 }}>
+            <PartsLegend parts={segments.map((s) => ({ label: s.label, color: s.color }))} />
+          </Box>
+          <BarList rows={stepRows} />
+        </Box>
+        <Box sx={{ minWidth: 0 }}>
+          <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
+            {t('silentTopUnusualTitle')}
+          </Typography>
+          <Typography variant="caption" sx={{ display: 'block', color: 'text.secondary', mb: 1.5 }}>
+            {t('silentTopUnusualNote', { window: windowLabel })}
+          </Typography>
+          {flaggedRows.length === 0 ? (
+            <Typography variant="body2" sx={{ color: 'text.secondary', py: 2 }}>
+              {t('silentNoUnusual')}
+            </Typography>
+          ) : (
+            <BarList rows={flaggedRows} rank />
+          )}
+        </Box>
+      </Box>
+    </Box>
+  )
 }
 
 function FlagIcon({ tip }: { tip: string }) {
@@ -325,6 +444,9 @@ export function SilentProductsCard({
   const [query, setQuery] = useState('')
   const [sort, setSort] = usePreference<Sort>('adshub.silent.sort', DEFAULT_SORT, acceptSort)
   const [limit, setLimit] = useState(PAGE)
+  const [savedView, setView] = usePreference<DetailView>('adshub.silent.view', 'chart', acceptView)
+  // The card's own list is always the table; the chart is the full view's.
+  const view: DetailView = bare ? savedView : 'table'
 
   const choose = (next: number) => {
     onMinutesChange(next)
@@ -407,6 +529,7 @@ export function SilentProductsCard({
       {/* The scope and the window, then the search: one row of controls above the list. */}
       <Stack direction="row" sx={{ alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 1.5, mb: 1.5 }}>
         <Stack direction="row" sx={{ alignItems: 'center', flexWrap: 'wrap', gap: 1 }}>
+          {bare ? <ViewToggle view={savedView} onChange={setView} /> : null}
           <ScopeToggle scope={scope} onChange={onScopeChange} />
           <Typography variant="caption" sx={{ color: 'text.secondary', ml: { sm: 1 } }}>
             {t('silentWindow')}
@@ -471,6 +594,7 @@ export function SilentProductsCard({
             </Stack>
           ) : null}
         </Stack>
+        {view === 'chart' ? null : (
         <TextField
           size="small"
           value={query}
@@ -491,6 +615,7 @@ export function SilentProductsCard({
           }}
           sx={{ flex: { xs: '1 1 100%', sm: '0 0 240px' } }}
         />
+        )}
       </Stack>
 
       {all && catalogLoading ? (
@@ -525,7 +650,9 @@ export function SilentProductsCard({
             ) : null}
           </Stack>
 
-          {listed.length === 0 ? (
+          {view === 'chart' ? (
+            <SilentChart rows={rows} quiet={quiet} windowLabel={windowLabel} since={text.since} approx={approx} />
+          ) : listed.length === 0 ? (
             <Typography variant="body2" sx={{ color: 'text.secondary', py: 4, textAlign: 'center' }}>
               {t(ended ? 'silentNoneEnd' : 'silentNone', { total: rows.length, period, window: windowLabel })}
             </Typography>
@@ -584,7 +711,8 @@ export function SilentProductsCard({
                                 title={sinceTip}
                                 sx={{ display: { xs: 'block', sm: 'none' }, color: 'text.secondary' }}
                               >
-                                {t('silentCompact', {
+                                {/* A product never ordered reads "No orders yet · …", not "No orders for No orders yet". */}
+                                {t(row.last === null ? 'silentCompactNever' : 'silentCompact', {
                                   since: text.since(row),
                                   orders: formatNumber(row.orders, locale),
                                   expected: approx(row.expected),
@@ -612,7 +740,7 @@ export function SilentProductsCard({
             </TableScroll>
           )}
 
-          {sorted.length > limit ? (
+          {view === 'table' && sorted.length > limit ? (
             <Box sx={{ textAlign: 'center', mt: 1 }}>
               <Button size="small" onClick={() => setLimit((value) => value + PAGE)}>
                 {t('silentMore', { count: Math.min(PAGE, sorted.length - limit) })}
@@ -657,6 +785,7 @@ export function SilentProductsSummary({
   projectId: string
 }) {
   const t = useTranslations('dashboard')
+  const locale = useLocale()
   const duration = useDuration()
   const [minutes, setMinutes] = useSilentWindow()
   const [scope, setScope] = useSilentScope()
@@ -675,6 +804,7 @@ export function SilentProductsSummary({
     DEFAULT_SORT,
   )
   const unusual = quiet.filter((row) => row.expected >= UNUSUAL).length
+  const segments = useStateSegments(rows)
   const options = PRESETS.includes(minutes) ? PRESETS : [...PRESETS, minutes].sort((a, b) => a - b)
   const headlineKey = all
     ? ended
@@ -739,6 +869,9 @@ export function SilentProductsSummary({
                 </Typography>
               </Stack>
             ) : null}
+            <Box sx={{ mt: 1.25 }}>
+              <ShareBar segments={segments} height={10} format={(value) => formatNumber(value, locale)} />
+            </Box>
 
             {quiet.length === 0 ? (
               <Typography variant="body2" sx={{ color: 'text.secondary', py: 3 }}>

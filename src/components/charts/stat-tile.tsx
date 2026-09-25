@@ -88,7 +88,8 @@ export function StatTile({
   deltaLabel?: string
   trend?: number[]
   accent?: string
-  footnote?: string
+  /** Context under the change: a line, or two (a fragment with a <br />). */
+  footnote?: React.ReactNode
   /** Set while the figure's data is still syncing: why it may be short, shown on a sync icon by the label. */
   pending?: string
 }) {
@@ -104,7 +105,8 @@ export function StatTile({
     <Card sx={{ height: '100%' }} onPointerEnter={() => setHovered(true)} onPointerLeave={() => setHovered(false)}>
       <CardContent sx={{ p: 2, '&:last-child': { pb: 2 } }}>
         <Stack direction="row" spacing={0.5} sx={{ alignItems: 'center', minWidth: 0 }}>
-          <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block' }} noWrap>
+          {/* A label may name its source ("Doanh thu cửa hàng (Sapo)"): it wraps on a narrow tile rather than lose it. */}
+          <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block', lineHeight: 1.35 }}>
             {label}
           </Typography>
           {pending ? (
@@ -135,7 +137,7 @@ export function StatTile({
         */}
         <Box sx={{ mt: 0.75 }}>
           {hasDelta ? (
-            <Stack direction="row" spacing={0.5} sx={{ alignItems: 'center', minHeight: 20, minWidth: 0 }}>
+            <Stack direction="row" useFlexGap sx={{ alignItems: 'center', minHeight: 20, minWidth: 0, flexWrap: 'wrap', columnGap: 0.5 }}>
               <Icon
                 sx={{
                   fontSize: 16,
@@ -149,7 +151,7 @@ export function StatTile({
                 {`${up ? '+' : ''}${(delta.ratio * 100).toFixed(Math.abs(delta.ratio) < 0.1 ? 1 : 0)}%`}
               </Typography>
               {deltaLabel ? (
-                <Typography variant="caption" sx={{ color: 'text.disabled' }} noWrap>
+                <Typography variant="caption" sx={{ color: 'text.disabled', lineHeight: 1.4 }}>
                   {deltaLabel}
                 </Typography>
               ) : null}
@@ -157,7 +159,7 @@ export function StatTile({
           ) : (
             <Box sx={{ minHeight: 20 }} />
           )}
-          <Typography variant="caption" sx={{ color: 'text.disabled', display: 'block', minHeight: 18 }} noWrap>
+          <Typography variant="caption" sx={{ color: 'text.disabled', display: 'block', minHeight: 18, lineHeight: 1.4 }}>
             {footnote ?? ' '}
           </Typography>
         </Box>

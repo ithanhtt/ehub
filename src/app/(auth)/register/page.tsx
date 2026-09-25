@@ -15,10 +15,13 @@ import TextField from '@mui/material/TextField'
 import Typography from '@mui/material/Typography'
 import PersonAddAltOutlined from '@mui/icons-material/PersonAddAltOutlined'
 import { authClient } from '@/core/auth/client'
+import { useHydrated } from '@/components/ui/use-preference'
 
 export default function RegisterPage() {
   const t = useTranslations('auth')
   const router = useRouter()
+  // Until the page runs, the button waits: tapped earlier, the browser would submit the form itself and only reload the page.
+  const ready = useHydrated()
 
   const [name, setName] = useState('')
   const [email, setEmail] = useState('')
@@ -62,11 +65,12 @@ export default function RegisterPage() {
           {t('registerSubtitle')}
         </Typography>
 
-        <Stack component="form" onSubmit={handleSubmit} spacing={2.5} sx={{ mt: 3.5 }}>
+        <Stack component="form" method="post" onSubmit={handleSubmit} spacing={2.5} sx={{ mt: 3.5 }}>
           {error ? <Alert severity="error">{error}</Alert> : null}
 
           <TextField
             label={t('name')}
+            name="name"
             autoComplete="name"
             required
             value={name}
@@ -75,6 +79,7 @@ export default function RegisterPage() {
 
           <TextField
             label={t('email')}
+            name="email"
             type="email"
             autoComplete="email"
             required
@@ -85,6 +90,7 @@ export default function RegisterPage() {
 
           <TextField
             label={t('password')}
+            name="password"
             type="password"
             autoComplete="new-password"
             required
@@ -96,6 +102,7 @@ export default function RegisterPage() {
 
           <TextField
             label={t('confirmPassword')}
+            name="confirm"
             type="password"
             autoComplete="new-password"
             required
@@ -109,12 +116,12 @@ export default function RegisterPage() {
             type="submit"
             variant="contained"
             size="large"
-            disabled={pending || mismatch}
+            disabled={!ready || pending || mismatch}
             startIcon={
-              pending ? <CircularProgress size={16} color="inherit" /> : <PersonAddAltOutlined />
+              pending || !ready ? <CircularProgress size={16} color="inherit" /> : <PersonAddAltOutlined />
             }
           >
-            {pending ? t('signingUp') : t('signUp')}
+            {!ready ? t('preparing') : pending ? t('signingUp') : t('signUp')}
           </Button>
         </Stack>
 

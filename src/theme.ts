@@ -478,9 +478,31 @@ const theme = createTheme({
       },
     },
 
+    /*
+     * The same card as the charts' tooltips (components/charts/chart-tooltip.tsx):
+     * light on light, dark on dark, figures in the text colour — one look for
+     * everything read on hover. A short wait before the first, none between
+     * neighbours, so sweeping across a row of cells reads each one at once.
+     */
     MuiTooltip: {
-      defaultProps: { arrow: true },
-      styleOverrides: { tooltip: { fontSize: '0.75rem', borderRadius: 8 } },
+      defaultProps: { arrow: true, enterDelay: 200, enterNextDelay: 0 },
+      styleOverrides: {
+        tooltip: {
+          fontSize: '0.75rem',
+          lineHeight: 1.45,
+          borderRadius: 8,
+          padding: '8px 12px',
+          maxWidth: 320,
+          color: 'var(--mui-palette-text-primary)',
+          backgroundColor: 'var(--adshub-surface-floating)',
+          backdropFilter: 'blur(12px)',
+          boxShadow: '0 12px 32px -18px rgb(0 0 0 / 0.45), 0 0 0 1px var(--mui-palette-divider)',
+        },
+        arrow: {
+          color: 'var(--adshub-surface-floating)',
+          '&::before': { boxShadow: '0 0 0 1px var(--mui-palette-divider)' },
+        },
+      },
     },
 
     MuiLinearProgress: { styleOverrides: { root: { borderRadius: 999 } } },

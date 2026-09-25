@@ -1,13 +1,7 @@
 import { useTranslations } from 'next-intl'
 
-/** Case- and accent-insensitive, so "sua rua mat" finds "Sữa rửa mặt". */
-export const fold = (text: string) =>
-  text
-    .normalize('NFD')
-    .replace(/\p{Diacritic}/gu, '')
-    .replace(/đ/g, 'd')
-    .replace(/Đ/g, 'D')
-    .toLowerCase()
+/** Case- and accent-insensitive, so "sua rua mat" finds "Sữa rửa mặt" (see fold.ts). */
+export { fold } from './fold'
 
 /** "2 giờ 15 phút", "1 ngày 3 giờ". */
 export function useDuration() {

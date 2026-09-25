@@ -1,6 +1,7 @@
 import type { ConnectorPlugin } from '@/core/plugins/types'
 import { sapoPlugin } from './sapo'
 import { tiktokAdsPlugin } from './tiktok-ads'
+import { tiktokShopPlugin } from './tiktok-shop'
 
 /**
  * ── The extension point ──────────────────────────────────────────────
@@ -18,4 +19,4 @@ import { tiktokAdsPlugin } from './tiktok-ads'
  * import a plugin folder directly — go through core/plugins/registry instead,
  * so a broken or removed plugin can never take the rest of the app down.
  */
-export const plugins: ConnectorPlugin[] = [tiktokAdsPlugin, sapoPlugin]
+export const plugins: ConnectorPlugin[] = [tiktokAdsPlugin, tiktokShopPlugin, sapoPlugin]

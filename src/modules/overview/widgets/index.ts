@@ -1,10 +1,11 @@
 import type { OverviewWidget } from '../types'
-import { orderHoursWidget } from './order-hours'
-import { sapoHeadlineWidget } from './sapo-headline'
+import { hourlyPerformanceWidget } from './hourly-performance'
+import { productHoursWidget } from './product-hours'
+import { scorecardWidget } from './scorecard'
 import { sapoSyncWidget } from './sapo-sync'
 import { sapoTrendWidget } from './sapo-trend'
 import { silentProductsWidget } from './silent-products'
-import { tiktokHeadlineWidget } from './tiktok-headline'
+import { tiktokSyncWidget } from './tiktok-sync'
 import { tiktokTrendWidget } from './tiktok-trend'
 import { topProductsWidget } from './top-products'
 
@@ -18,11 +19,12 @@ import { topProductsWidget } from './top-products'
  */
 export const OVERVIEW_WIDGETS: OverviewWidget[] = [
   sapoSyncWidget,
-  tiktokHeadlineWidget,
-  sapoHeadlineWidget,
+  tiktokSyncWidget,
+  scorecardWidget,
   tiktokTrendWidget,
   sapoTrendWidget,
+  hourlyPerformanceWidget,
+  productHoursWidget,
   topProductsWidget,
-  orderHoursWidget,
   silentProductsWidget,
 ]

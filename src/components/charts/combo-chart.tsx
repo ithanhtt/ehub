@@ -5,7 +5,8 @@ import Box from '@mui/material/Box'
 import ButtonBase from '@mui/material/ButtonBase'
 import Stack from '@mui/material/Stack'
 import Typography from '@mui/material/Typography'
-import { known, niceTicks, roundedTop, useTweened, useWidth } from './chart-kit'
+import { known, niceTicks, roundedTop, useChartPointer, useTweened, useWidth } from './chart-kit'
+import { ChartTooltip, TipContent } from './chart-tooltip'
 
 /**
  * A source's money and its orders in one chart: lines for amounts, columns for counts.
@@ -110,7 +111,8 @@ export function ComboChart({
     count: (value: number) => string
     tick: (value: number) => string
   }
-  text: { compare: string; previous: string; toggle: string; unitMoney: string; unitCount: string; lumped: string }
+  /** `current` and `previous` head the tooltip's two columns when comparing ("Today" / "Yesterday"). */
+  text: { compare: string; current: string; previous: string; toggle: string; unitMoney: string; unitCount: string; lumped: string }
   ariaLabel: string
   /** The series switched off — held by the caller when passed, to share it (card and dialog) or remember it. */
   hidden?: string[]
@@ -218,7 +220,7 @@ export function ComboChart({
 
   const svgHeight = margin.top + innerH + margin.bottom
   const tooltipLeft = active === null ? 0 : cx(active)
-  const flip = tooltipLeft > width * 0.6
+  const pointer = useChartPointer<number>(setActive, (event) => nearest(event.clientX, event.currentTarget.getBoundingClientRect()), () => setActive(count - 1))
   const read = (value: number | null | undefined, format: (v: number) => string) => (known(value) ? format(value) : '—')
 
   return (
@@ -277,10 +279,7 @@ export function ComboChart({
             aria-label={ariaLabel}
             tabIndex={0}
             style={{ display: 'block', outline: 'none', touchAction: 'pan-y' }}
-            onPointerMove={(event) => setActive(nearest(event.clientX, event.currentTarget.getBoundingClientRect()))}
-            onPointerLeave={() => setActive(null)}
-            onFocus={() => setActive(count - 1)}
-            onBlur={() => setActive(null)}
+            {...pointer}
             onKeyDown={(event) => {
               if (event.key === 'ArrowLeft') setActive(Math.max(0, (active ?? count - 1) - 1))
               if (event.key === 'ArrowRight') setActive(Math.min(count - 1, (active ?? 0) + 1))
@@ -503,63 +502,40 @@ export function ComboChart({
         ) : null}
 
         {active !== null && width > 0 ? (
-          <Box
-            role="status"
-            sx={{
-              position: 'absolute',
-              top: 4,
-              left: flip ? undefined : tooltipLeft + step / 2 + 8,
-              right: flip ? width - tooltipLeft + step / 2 + 8 : undefined,
-              minWidth: 190,
-              maxWidth: 280,
-              px: 1.5,
-              py: 1,
-              borderRadius: 2,
-              pointerEvents: 'none',
-              backgroundColor: 'var(--adshub-surface-floating)',
-              boxShadow: '0 12px 32px -18px rgb(0 0 0 / 0.45)',
-              backdropFilter: 'blur(12px)',
-            }}
-          >
-            <Typography variant="caption" sx={{ display: 'block', color: 'text.secondary', mb: 0.5 }}>
-              {pointLabels[active]}
-            </Typography>
-            {shownLines.map((line) => (
-              <TipRow
-                key={line.key}
-                mark="line"
-                color={line.color}
-                value={read(line.values[active], formats.moneyExact)}
-                label={line.label}
-                previous={comparing ? `${text.previous}: ${read(line.previous[active], formats.moneyExact)}` : null}
-              />
-            ))}
-            {columns ? (
-              <>
-                <TipRow
-                  mark="bar"
-                  color={columns.color}
-                  value={read(columns.values[active], formats.count)}
-                  label={columns.label}
-                  previous={comparing ? `${text.previous}: ${read(columns.previous[active], formats.count)}` : null}
-                />
-                {columns.part ? (
-                  <TipRow
-                    mark="bar"
-                    color={columns.part.color}
-                    value={read(columns.part.values[active], formats.count)}
-                    label={columns.part.label}
-                    previous={null}
-                  />
-                ) : null}
-                {columns.lumped?.[active] ? (
-                  <Typography variant="caption" sx={{ display: 'block', color: 'text.disabled', mt: 0.5 }}>
-                    {text.lumped}
-                  </Typography>
-                ) : null}
-              </>
-            ) : null}
-          </Box>
+          <ChartTooltip x={tooltipLeft} gap={step / 2 + 8} chartWidth={width} width={comparing ? 250 : 200}>
+            {/* Money lines, then the order columns; comparing, the period before in its own column. */}
+            <TipContent
+              title={pointLabels[active]}
+              currentLabel={text.current}
+              previousLabel={comparing ? text.previous : undefined}
+              rows={[
+                ...shownLines.map((line) => ({
+                  key: line.key,
+                  mark: 'line' as const,
+                  color: line.color,
+                  label: line.label,
+                  value: read(line.values[active], formats.moneyExact),
+                  previous: comparing ? read(line.previous[active], formats.moneyExact) : undefined,
+                })),
+                ...(columns
+                  ? [
+                      {
+                        key: columns.key,
+                        mark: 'bar' as const,
+                        color: columns.color,
+                        label: columns.label,
+                        value: read(columns.values[active], formats.count),
+                        previous: comparing ? read(columns.previous[active], formats.count) : undefined,
+                      },
+                      ...(columns.part
+                        ? [{ key: `${columns.key}-part`, mark: 'bar' as const, color: columns.part.color, label: columns.part.label, value: read(columns.part.values[active], formats.count) }]
+                        : []),
+                    ]
+                  : []),
+              ]}
+              notes={[columns?.lumped?.[active] ? text.lumped : null]}
+            />
+          </ChartTooltip>
         ) : null}
       </Box>
     </Box>
@@ -620,42 +596,5 @@ function LegendChip({
         {label}
       </Typography>
     </ButtonBase>
-  )
-}
-
-function TipRow({
-  mark,
-  color,
-  value,
-  label,
-  previous,
-}: {
-  mark: 'line' | 'bar'
-  color: string
-  value: string
-  label: string
-  previous: string | null
-}) {
-  return (
-    <Box sx={{ py: 0.25 }}>
-      <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
-        {mark === 'bar' ? (
-          <Box sx={{ width: 8, height: 8, borderRadius: '2px', backgroundColor: color, flexShrink: 0, mx: '2px' }} />
-        ) : (
-          <Box sx={{ width: 12, height: 0, borderTop: '2px solid', borderColor: color, flexShrink: 0 }} />
-        )}
-        <Typography variant="body2" sx={{ fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}>
-          {value}
-        </Typography>
-        <Typography variant="caption" sx={{ color: 'text.secondary' }} noWrap>
-          {label}
-        </Typography>
-      </Stack>
-      {previous ? (
-        <Typography variant="caption" sx={{ display: 'block', color: 'text.disabled', pl: 2.5 }}>
-          {previous}
-        </Typography>
-      ) : null}
-    </Box>
   )
 }

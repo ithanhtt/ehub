@@ -12,13 +12,15 @@ export const ROLE_RANK: Record<ProjectRole, number> = {
   owner: 40,
   admin: 30,
   editor: 20,
+  // Fills in the booking file and nothing else a viewer could not already see.
+  booker: 15,
   viewer: 10,
 }
 
-export const PROJECT_ROLES: ProjectRole[] = ['owner', 'admin', 'editor', 'viewer']
+export const PROJECT_ROLES: ProjectRole[] = ['owner', 'admin', 'editor', 'booker', 'viewer']
 
 /** Roles that may be handed out via the members screen. `owner` transfers separately. */
-export const ASSIGNABLE_ROLES: ProjectRole[] = ['admin', 'editor', 'viewer']
+export const ASSIGNABLE_ROLES: ProjectRole[] = ['admin', 'editor', 'booker', 'viewer']
 
 export type Capability =
   | 'project:view'
@@ -40,6 +42,8 @@ export type Capability =
   | 'dataset:read'
   | 'dataset:sync'
   | 'dataset:delete'
+  | 'booking:view'
+  | 'booking:edit'
 
 const REQUIRED_RANK: Record<Capability, number> = {
   'project:view': ROLE_RANK.viewer,
@@ -77,6 +81,10 @@ const REQUIRED_RANK: Record<Capability, number> = {
   'dataset:read': ROLE_RANK.viewer,
   'dataset:sync': ROLE_RANK.editor,
   'dataset:delete': ROLE_RANK.admin,
+
+  // The booking file: everyone reads it (the reports do); bookers and up keep it.
+  'booking:view': ROLE_RANK.viewer,
+  'booking:edit': ROLE_RANK.booker,
 }
 
 export function can(role: ProjectRole | null | undefined, capability: Capability): boolean {

@@ -115,9 +115,21 @@ src/
 │  └─ utils/      id, slug tiếng Việt, suy luận schema từ dữ liệu
 │
 ├─ plugins/                  Mỗi nhà cung cấp là một thư mục độc lập
-│  ├─ tiktok-ads/  index.ts + endpoints.ts
-│  ├─ sapo/        index.ts + endpoints.ts
-│  └─ index.ts     ← ĐIỂM MỞ RỘNG: danh sách đăng ký
+│  ├─ tiktok-ads/    index.ts + endpoints.ts
+│  ├─ tiktok-shop/   Partner API: ký request, tự làm mới token
+│  ├─ sapo/          index.ts + endpoints.ts
+│  └─ index.ts       ← ĐIỂM MỞ RỘNG: danh sách đăng ký
+│
+├─ modules/                  Các trang của project, mỗi module một thư mục
+│  ├─ overview/      Tổng quan (live)
+│  ├─ bookings/      Dữ liệu booking: chuẩn trường, chiến dịch, nhập tay/hàng loạt, Excel/CSV
+│  ├─ analytics/     KHUNG CHUNG của 4 báo cáo: kỳ, nguồn, trang, thẻ, bộ đọc dữ liệu
+│  ├─ booking-koc/   Booking & KOC
+│  ├─ video-gmv/     Video & GMV sản phẩm
+│  ├─ cost-roi/      Chi phí & ROI
+│  ├─ order-cancel/  Đơn & huỷ
+│  ├─ index.ts       ← danh sách module (menu)
+│  └─ reports.ts     ← server: module id → hàm dựng báo cáo
 │
 ├─ features/                 Logic nghiệp vụ (server actions + queries)
 │  ├─ projects/    project, thành viên, lời mời
@@ -691,16 +703,17 @@ khoản người dùng chọn trên form thắng một id cũ còn sót trong JS
 
 Vai trò trong project được xếp hạng: quyền cao bao trùm quyền thấp.
 
-| Khả năng | Owner | Admin | Editor | Viewer |
-|---|---|---|---|---|
-| Xem project, danh mục API, dữ liệu | ✅ | ✅ | ✅ | ✅ |
-| Gọi API, đồng bộ dataset | ✅ | ✅ | ✅ | — |
-| Gọi đường dẫn tự do — **đọc** | ✅ | ✅ | ✅ | — |
-| Gọi đường dẫn tự do — **ghi** | ✅ | ✅ | — | — |
-| Thêm/sửa/xoá kết nối API | ✅ | ✅ | — | — |
-| Mời và phân quyền thành viên | ✅ | ✅ | — | — |
-| Sửa cài đặt project | ✅ | ✅ | — | — |
-| Xoá project | ✅ | — | — | — |
+| Khả năng | Owner | Admin | Editor | Booking | Viewer |
+|---|---|---|---|---|---|
+| Xem project, danh mục API, dữ liệu, dữ liệu booking | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Thêm/sửa/xoá/nhập booking và chiến dịch booking | ✅ | ✅ | ✅ | ✅ | — |
+| Gọi API, đồng bộ dataset | ✅ | ✅ | ✅ | — | — |
+| Gọi đường dẫn tự do — **đọc** | ✅ | ✅ | ✅ | — | — |
+| Gọi đường dẫn tự do — **ghi** | ✅ | ✅ | — | — | — |
+| Thêm/sửa/xoá kết nối API | ✅ | ✅ | — | — | — |
+| Mời và phân quyền thành viên | ✅ | ✅ | — | — | — |
+| Sửa cài đặt project | ✅ | ✅ | — | — | — |
+| Xoá project | ✅ | — | — | — | — |
 
 Ngoài ra `user.role` ở cấp hệ thống là `admin` hoặc `user`, độc lập với vai trò
 project. Một người có thể tạo nhiều project riêng biệt và chia sẻ từng project
@@ -738,6 +751,162 @@ riêng cho từng nhà cung cấp. `datasets.field_hints` giữ schema suy luậ
 Khi khối lượng đủ lớn để JSONB không còn đủ nhanh, hướng mở rộng là dựng bảng
 mart đã chuẩn hoá bên cạnh, đọc từ landing zone này — không phải viết lại phần
 thu nhận dữ liệu.
+
+---
+
+## Bốn báo cáo: Booking & KOC, Video & GMV, Chi phí & ROI, Đơn & huỷ
+
+Bốn nguồn, nối với nhau bằng ba khoá:
+
+| Nguồn | Plugin | Dùng cho |
+|---|---|---|
+| Dữ liệu booking | — (trong ứng dụng) | Mã KOC, ngày book/air, ID video, ID sản phẩm, chi phí |
+| TikTok Shop | `tiktok-shop` | Đơn hàng + voucher, đơn affiliate (KOC, video, hoa hồng — cần scope affiliate; thiếu scope thì báo cáo bỏ qua, không cảnh báo), video mới, số sao |
+| TikTok Ads | `tiktok-ads` | GMV Max theo sản phẩm và theo video, ROI mục tiêu |
+| Sapo | `sapo` | Đơn khởi tạo/huỷ theo sản phẩm và theo giờ |
+
+| Khoá | Cách khớp |
+|---|---|
+| Sản phẩm | ID sản phẩm TikTok (= `item_group_id` của GMV Max). Sapo không biết ID này — khớp qua **seller SKU** trên các đơn TikTok Shop |
+| KOC | handle TikTok viết thường, bỏ `@` và link (`shared/keys.ts`) |
+| Video | ID video, tách từ link nếu dữ liệu booking dán link |
+
+| Báo cáo | Nguồn | Trả lời |
+|---|---|---|
+| Booking & KOC | Booking, TikTok Shop, TikTok Ads | Mỗi ngày: video booking air, tổng video gắn giỏ (phân tích video TikTok Shop), video tự gắn giỏ = tổng − booking, video GMV Max phân phối; tác động của booking lên video tự nhiên (ngày có vs không booking, tương quan); xu hướng GMV Max so với booking. Không dùng API affiliate |
+| Video & GMV sản phẩm | Booking, TikTok Shop | Video booking air, video mới gắn sản phẩm, GMV sản phẩm; tương quan ba yếu tố |
+| Chi phí & ROI | TikTok Shop, TikTok Ads, Booking | Voucher TikTok/shop (không tính đơn huỷ), chi phí ads theo KOC/sản phẩm, hoa hồng, GMV khách đặt vs GMV ads, đánh giá xấu, ROI mục tiêu tốt nhất |
+| Đơn & huỷ | Sapo, TikTok Ads, TikTok Shop (để khớp SKU) | Đơn khởi tạo/huỷ theo sản phẩm, đơn từ ads, giờ ra đơn nhiều nhất, giờ huỷ ít nhất |
+
+### Quy tắc module / widget
+
+Mỗi báo cáo là một thư mục trong `src/modules/`: `module.ts` (mục menu), `types.ts`
+(hình dạng câu trả lời), `report.ts` (server dựng câu trả lời), `widgets/` (mỗi thẻ
+một thư mục, khai báo band, thứ tự, độ rộng và **nguồn cần có**), `page.tsx`. Khung
+chung (`modules/analytics/shell/report-page.tsx`) lo bộ lọc kỳ (7/30/90 ngày, tuỳ
+chọn đến 186 ngày) và gộp **theo ngày/tháng**, trạng thái nguồn, tự làm mới, và
+cách ly widget lỗi. Thêm một thẻ = một thư mục + một dòng trong `widgets/index.ts`.
+Thêm một báo cáo = một thư mục + một dòng trong `modules/index.ts` và `modules/reports.ts`
++ một file route trang.
+
+Tương quan giữa hai chỉ số là **Pearson r qua các kỳ** (ngày hoặc tháng), cần ít
+nhất 5 kỳ có đủ cả hai số — ít hơn thì thẻ nói "chưa đủ" thay vì gọi tên một mối
+quan hệ. Kỳ thiếu dữ liệu là **khoảng trống**, không phải số 0.
+
+### Dữ liệu lưu theo ngày
+
+`modules/analytics/data/day-store.ts` giữ số liệu tổng hợp **theo ngày** trong
+`.data/cache/<nguồn>-<connectionId>.json` — theo sản phẩm, theo KOC, không theo
+từng đơn — và chỉ đọc lại ngày còn có thể thay đổi:
+
+| Kho | Đọc lại |
+|---|---|
+| Đơn TikTok Shop | hôm nay mỗi 15 phút, 7 ngày gần 3 giờ/lần, cũ hơn thì giữ |
+| Đơn affiliate | hôm nay 30 phút, 30 ngày gần (hoa hồng còn quyết toán) 12 giờ/lần |
+| Video, hiệu quả sản phẩm, số sao | 3 ngày gần mỗi 3 giờ (TikTok có số liệu trễ 1–2 ngày), 10 ngày gần mỗi ngày |
+| GMV Max | theo cửa sổ cố định 30 ngày; cửa sổ chạm hôm nay 15 phút, cũ 6 giờ (bộ nhớ) |
+| Sapo | kho ngày sẵn có của Tổng quan (thêm SKU và giờ theo sản phẩm, `PRODUCTS_VERSION` 3) |
+
+Trang báo "Đang đồng bộ" và tự hỏi lại mỗi 6 giây khi còn ngày đang đọc. Trên máy
+chủ, tiến trình nền giữ sẵn 35 ngày gần nhất của TikTok Shop.
+
+### Những gì API không cho, và cách xử lý
+
+- **TikTok không có API liệt kê đánh giá** — chỉ có phân bố số sao của *một* sản
+  phẩm trong một khoảng. Mỗi ngày báo cáo hỏi cho **25 sản phẩm bán chạy nhất**;
+  "đánh giá xấu" = 1–2 sao.
+- **TikTok không lưu lịch sử ROI mục tiêu** (`roas_bid`) — chỉ giá trị hiện tại.
+  EHub ghi lại mỗi ngày (`.data/cache/gmv-targets-*.json`) từ lần đầu mở báo cáo;
+  "mức tốt nhất" chỉ có khi một mức đã chạy ít nhất 3 ngày: trong các mức TikTok
+  đạt được (ROI thực ≥ mục tiêu), mức mang về GMV/ngày cao nhất.
+- **Đơn affiliate không có "GMV"** — dùng `estimated_commission_base` (giá × số
+  lượng). Hoa hồng là **ước tính** cho đến khi quyết toán.
+- **Chi phí ads theo KOC**: chi tiêu GMV Max theo video (`item_id`), gán cho KOC
+  qua dữ liệu booking (ID video → KOC), rồi dữ liệu video/affiliate của TikTok Shop.
+  Video không xác định được KOC được báo riêng, không chia.
+
+### Kết nối TikTok Shop
+
+1. Partner Center → tạo app, bật scope: *Shop Authorized Information*, *Order
+   Information*, *Product Basic*, *Read Seller Affiliate Collaboration*, *TikTok Shop
+   Analytics*. Lấy App Key, App Secret.
+2. Mở link uỷ quyền của app bằng tài khoản chủ shop; TikTok chuyển về `…?code=XXXX`.
+3. Cài đặt → Kết nối API → TikTok Shop: dán App Key, App Secret, và `XXXX` vào ô
+   auth_code → Lưu. Hệ thống đổi lấy access + refresh token, và **tự làm mới** access
+   token một ngày trước khi hết hạn (`refreshCredentials` +
+   `core/plugins/fresh-credentials.ts` — nơi duy nhất ngoài lúc lưu/action được ghi
+   credential).
+
+Danh mục trong API Hub: **156 endpoint** — 11 đã đọc kỹ tài liệu (`endpoints.ts`) và
+145 khai từ đường dẫn (`endpoints-declared.ts`, nhãn "suy luận từ đường dẫn"): đơn
+hàng, sản phẩm, fulfillment, kho, FBT, tài chính, khuyến mãi, huỷ/trả hàng, phân tích,
+affiliate (seller, creator app, partner app), CSKH, webhook. Endpoint khai từ đường dẫn
+nhận tham số tự do: ô **query (JSON)** và ô **body (JSON)** dán theo tài liệu; hệ thống
+tự thêm `app_key`, `timestamp`, `shop_cipher` và ký. Mọi endpoint ghi dữ liệu được đánh
+dấu `mutating` (Hub hỏi xác nhận, công cụ dò quyền không gọi).
+
+Ký request (`plugins/tiktok-shop/sign.ts`): mọi query trừ `sign`/`access_token`,
+sắp xếp theo khoá, nối `key+value`, thêm path phía trước và body phía sau, bọc bằng
+app_secret, HMAC-SHA256 hex. `check:plugins` kiểm lại quy tắc này bằng một bản viết
+tay độc lập.
+
+### Dữ liệu booking và chiến dịch booking
+
+Dữ liệu booking nằm ngay trong ứng dụng (menu **Dữ liệu booking**, `src/modules/bookings`),
+không cần kết nối ngoài. Người có vai trò **Booking** (hoặc Editor trở lên) thêm, sửa,
+xoá, chuyển chiến dịch, hoặc **nhập hàng loạt** từ Excel (.xlsx, .xls), OpenDocument,
+CSV/TSV hay dán thẳng vùng ô từ Excel/Google Sheets. Mọi người trong project đều xem được.
+
+**Chiến dịch booking** (`campaigns.ts`) gom các booking của một đợt. Form chiến dịch
+hiện đủ các nhóm: *Chiến dịch*, *Thời gian* (chip 7 ngày / 30 ngày / hết tháng),
+*Tự điền cho mỗi booking* (sản phẩm chính, chi phí thường dùng), *Ngân sách & mục
+tiêu* (có ngân sách và chi phí thì gợi ý số video mua được). Chỉ tên là bắt buộc; cũng
+có thể gõ tên mới ngay trong form thêm booking. Chiến dịch là
+các tab trên danh sách; dòng tóm tắt dưới tab cho biết số booking, đã air (so với
+mục tiêu), chờ air và chi phí (so với ngân sách). Xoá chiến dịch không xoá booking của nó.
+
+Trang được làm để theo dõi và thao tác ngay trên danh sách (`triage.ts`):
+
+- Chip **Cần xử lý** gom booking chờ air quá 7 ngày và booking đã air nhưng thiếu link
+  video; chip trạng thái kèm số đếm.
+- Booking chờ air có nút **Dán link** ngay trên dòng: dán là lưu, booking chuyển sang
+  *Đã air* theo ngày đăng video; link của KOC khác bị từ chối.
+- Mỗi dòng hiện KOC đầy đủ: tên, liên hệ, số lần đã book và tổng chi. Bấm **@KOC** mở
+  ngăn thông tin KOC (`koc-drawer.tsx`): hồ sơ, link TikTok, thống kê, toàn bộ lịch sử
+  booking và nút *Book lại*; sửa tên/liên hệ ở đây áp dụng cho mọi booking của KOC.
+- Form sửa (booking, chiến dịch, KOC) chỉ hiện nút *Lưu thay đổi* khi thông tin đã khác đi.
+- Bấm dòng để sửa; menu ⋯ để huỷ/khôi phục, xoá. Chọn nhiều dòng thì thanh lọc đổi
+  thành thao tác hàng loạt (chuyển chiến dịch, huỷ, khôi phục, xoá).
+- Nhập file, xuất Excel, tải file mẫu nằm trong menu ⋯ đầu trang; phím **N** để thêm booking.
+
+Chuẩn trường (`fields.ts`): *Chiến dịch*, *ID KOC* (bắt buộc), *Tên KOC*, *Liên hệ*,
+*Ngày book* (bắt buộc), *Ngày air*, *Link video*, *ID sản phẩm*, *Chi phí booking*
+(bắt buộc), *Trạng thái* (Chờ air / Đã air / Đã huỷ), *Ghi chú*. Nút **Tải file mẫu**
+cho file .xlsx có sẵn tiêu đề chuẩn và sheet hướng dẫn từng cột; **Xuất Excel** ra
+đúng bố cục đó nên sửa xong nhập lại được.
+
+Form thêm/sửa booking hiện đủ các trường, chia nhóm *KOC*, *Booking*, *Thời gian &
+trạng thái* (`form-parts.tsx` dùng chung với form chiến dịch). Giá trị tự tính hiện
+ngay trong ô, đánh dấu ✦ tự động; gõ đè để đổi, xoá trắng để trả lại tự động.
+
+- Dán link video là đủ: KOC lấy từ link, ngày air từ ID video (32 bit đầu của ID là
+  thời điểm đăng), ngày book theo ngày air. Chỉ @KOC thì là booking *Chờ air*, ngày
+  book hôm nay.
+- KOC đã từng book tự điền tên, liên hệ, chi phí lần trước; chiến dịch tự điền sản
+  phẩm và chi phí thường dùng; chi phí chọn nhanh bằng chip.
+- **Dán nhiều dòng** (`quick-entry.ts`) là thêm hàng loạt trong cùng form: mỗi dòng
+  một link, ID video hoặc @KOC, chi phí riêng ghi sau nếu khác.
+- *Lưu & thêm tiếp* giữ chiến dịch, sản phẩm và chi phí; Ctrl+Enter để lưu.
+
+Khi nhập file, cột được nhận theo tiêu đề (không phân biệt dấu, hoa thường — *Mã KOC*,
+*Link kênh*, *Cast*, *Link air*, *Ngày lên video*… đều nhận), cột lạ ghép tay được.
+Từng dòng được kiểm tra trước khi gửi: ngày `12/09/2026`, `12/9`, ô ngày Excel; tiền
+`1.500.000đ`, `1,5tr`, `1tr5`, `500k`; link video phải có ID; ngày air không trước
+ngày book. Chiến dịch ghi trong file mà chưa có sẽ được tạo; dòng không ghi chiến dịch
+vào chiến dịch chọn lúc nhập. Dòng lỗi được đánh dấu và tải về được để sửa. Dòng cùng video với dòng
+đã có thì **cập nhật** thay vì nhân đôi; dòng trùng hệt (không có video) bị bỏ qua.
+Server kiểm lại cùng quy tắc, và mọi thay đổi được ghi vào audit log. Dòng *Đã huỷ*
+không tính vào báo cáo.
 
 ---
 
@@ -1027,6 +1196,19 @@ hoàn tác (viết migration theo kiểu chỉ thêm); cần thì phục hồi t
 | Lịch sử và nhật ký từng lần cập nhật | 30 lần gần nhất |
 | Gói cập nhật đã nhận | Xoá sau mỗi lần chạy |
 | Nhật ký PM2 | Xoay vòng bằng `pm2-logrotate`: 10 MB mỗi file, giữ 7 file, nén |
+
+**Tự dọn hằng ngày** khi app đang chạy (5 phút sau khi khởi động, rồi mỗi 24 giờ — `src/core/housekeeping.ts`):
+
+| Thứ gì | Giữ lại |
+|---|---|
+| Nhật ký gọi API Hub (`api_call_logs`) | 30 ngày, tối đa 20.000 dòng mới nhất mỗi dự án |
+| Nhật ký thay đổi (`audit_logs`) | 365 ngày |
+| Phiên đăng nhập, mã xác minh | Xoá khi đã hết hạn |
+| CSDL nhúng | `VACUUM` sau khi xoá, để dùng lại chỗ trống thay vì phình file |
+| Bộ nhớ đệm `.data/cache` | Xoá file của kết nối đã xoá; file không được ghi 90 ngày (trừ lịch sử ROI mục tiêu và kho Sapo); file tạm sót lại sau sự cố; file hỏng chỉ giữ 3 bản mới nhất trong 14 ngày |
+| Dung lượng đĩa | Cảnh báo trong nhật ký khi còn dưới 2 GB trống |
+
+Cảnh báo lặp lại (một nguồn lỗi mỗi phút) chỉ ghi một lần, rồi tối đa mỗi giờ một lần kèm số lần lặp.
 
 Không tự dọn: bộ nhớ đệm npm (`/home/adshub/.npm`, ~200 MB) và các file bạn tự
 chép vào `/root`.

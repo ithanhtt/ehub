@@ -14,7 +14,9 @@ import ListItemText from '@mui/material/ListItemText'
 import Menu from '@mui/material/Menu'
 import MenuItem from '@mui/material/MenuItem'
 import Typography from '@mui/material/Typography'
+import DnsOutlined from '@mui/icons-material/DnsOutlined'
 import LogoutOutlined from '@mui/icons-material/LogoutOutlined'
+import StorageOutlined from '@mui/icons-material/StorageOutlined'
 import SystemUpdateAltOutlined from '@mui/icons-material/SystemUpdateAltOutlined'
 import VerifiedUserOutlined from '@mui/icons-material/VerifiedUserOutlined'
 import { authClient } from '@/core/auth/client'
@@ -115,9 +117,37 @@ export function UserMenu({
           <MenuItem
             onClick={() => {
               setAnchor(null)
-              router.push('/admin/updates')
+              router.push('/admin/system')
             }}
             sx={{ mt: 0.5 }}
+          >
+            <ListItemIcon>
+              <DnsOutlined fontSize="small" />
+            </ListItemIcon>
+            <ListItemText slotProps={{ primary: { variant: 'body2' } }}>{t('systemInfo')}</ListItemText>
+          </MenuItem>
+        ) : null}
+
+        {isAdmin ? (
+          <MenuItem
+            onClick={() => {
+              setAnchor(null)
+              router.push('/admin/database')
+            }}
+          >
+            <ListItemIcon>
+              <StorageOutlined fontSize="small" />
+            </ListItemIcon>
+            <ListItemText slotProps={{ primary: { variant: 'body2' } }}>{t('database')}</ListItemText>
+          </MenuItem>
+        ) : null}
+
+        {isAdmin ? (
+          <MenuItem
+            onClick={() => {
+              setAnchor(null)
+              router.push('/admin/updates')
+            }}
           >
             <ListItemIcon>
               <SystemUpdateAltOutlined fontSize="small" />

@@ -3,8 +3,8 @@ import 'server-only'
 import { eq } from 'drizzle-orm'
 import { db } from '@/core/db/client'
 import { apiCallLogs, connections } from '@/core/db/schema/connections'
-import { decryptJson } from '@/core/crypto/secrets'
 import { createId } from '@/core/utils/id'
+import { freshContext } from './fresh-credentials'
 import { readPath, sendRequest, type HttpResult } from './http'
 import { coerceParams, validateParams, type ParamValues } from './params'
 import { buildRequestEcho, secretValuesOf, type RequestEcho } from './redact'
@@ -60,12 +60,8 @@ export async function executeEndpoint(args: ExecuteArgs): Promise<ExecuteResult>
   const plugin = requirePlugin(connection.pluginId)
   const endpoint = requireEndpoint(connection.pluginId, args.endpointId)
 
-  const context: ConnectionContext = {
-    credentials: connection.credentials ? decryptJson(connection.credentials) : {},
-    metadata: connection.metadata ?? {},
-    connectionId: connection.id,
-    projectId: connection.projectId,
-  }
+  // An expiring token is renewed (and stored) before it is used.
+  const context: ConnectionContext = await freshContext(connection)
 
   // Order matters: the connector first supplies whatever the connection can
   // provide, and only then is the complete param set validated. Validating
@@ -196,12 +192,7 @@ export async function testConnection(connectionId: string, projectId: string) {
   if (!connection || connection.projectId !== projectId) throw new Error('CONNECTION_NOT_FOUND')
 
   const plugin = requirePlugin(connection.pluginId)
-  const context: ConnectionContext = {
-    credentials: connection.credentials ? decryptJson(connection.credentials) : {},
-    metadata: connection.metadata ?? {},
-    connectionId: connection.id,
-    projectId: connection.projectId,
-  }
+  const context: ConnectionContext = await freshContext(connection)
 
   let outcome
   try {

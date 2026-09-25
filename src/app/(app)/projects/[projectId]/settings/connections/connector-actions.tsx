@@ -12,7 +12,7 @@ import DialogActions from '@mui/material/DialogActions'
 import DialogContent from '@mui/material/DialogContent'
 import DialogTitle from '@mui/material/DialogTitle'
 import Stack from '@mui/material/Stack'
-import TextField from '@mui/material/TextField'
+import { CredentialField } from '@/components/ui/credential-field'
 import Typography from '@mui/material/Typography'
 import BuildOutlined from '@mui/icons-material/BuildOutlined'
 import CheckCircleOutlined from '@mui/icons-material/CheckCircleOutlined'
@@ -249,6 +249,11 @@ function ActionInputDialog({
     >
       {action ? (
         <form
+          autoComplete="off"
+          data-1p-ignore="true"
+          data-lpignore="true"
+          data-bwignore="true"
+          data-form-type="other"
           onSubmit={(event) => {
             event.preventDefault()
             onSubmit(values)
@@ -265,12 +270,11 @@ function ActionInputDialog({
               ) : null}
 
               {action.inputs.map((field) => (
-                <TextField
+                <CredentialField
                   key={field.key}
                   label={field.label[locale]}
-                  type={field.type === 'password' ? 'password' : 'text'}
+                  secret={field.type === 'password' || Boolean(field.secret)}
                   required={field.required}
-                  autoComplete="off"
                   helperText={field.help?.[locale]}
                   value={values[field.key] ?? ''}
                   onChange={(event) =>

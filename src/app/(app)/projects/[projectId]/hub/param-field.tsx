@@ -11,6 +11,7 @@ import TextField from '@mui/material/TextField'
 import Typography from '@mui/material/Typography'
 import type { ParamSpec } from '@/core/plugins/types'
 import type { Locale } from '@/i18n/config'
+import { DateField } from '@/components/ui/date-field'
 import { MONO_STACK } from '@/theme'
 
 /**
@@ -188,7 +189,7 @@ export function ParamField({
         )
 
       case 'date':
-        return <TextField {...common} type="date" slotProps={MONO_INPUT} />
+        return <DateField value={value} onChange={onChange} helperText={helper} slotProps={MONO_INPUT} />
 
       default:
         return <TextField {...common} placeholder={spec.placeholder} slotProps={MONO_INPUT} />

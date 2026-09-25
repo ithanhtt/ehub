@@ -34,7 +34,11 @@ export type EndpointProbe = {
  * expired. 40100 used to sit here and is in fact the app-level rate limit —
  * a throttled probe must never read as a refusal.
  */
-const PERMISSION_CODES = new Set([40001, 40101, 40102, 40103, 40118, 40125])
+const PERMISSION_CODES = new Set([
+  40001, 40101, 40102, 40103, 40118, 40125,
+  // TikTok Shop (Partner Center, "Common errors"): 105005 the app lacks the scope.
+  105005,
+])
 
 /** TikTok throttles with HTTP 200 and a code: app-level, per field value, per advertiser. */
 const THROTTLE_CODES = new Set([40100, 40132, 40133])

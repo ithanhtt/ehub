@@ -8,9 +8,10 @@
  * rather than replacing it, so the choice survives a re-test.
  *
  * `null` (or absent) means everything, including shops and channels that
- * appear later; a list means exactly those.
+ * appear later; a list means exactly those. `hidden` leaves the whole source
+ * off the overview, its connection untouched (the reports still read it).
  */
-export type DashboardSelection = { gmvStores: string[] | null; sapoChannels: string[] | null }
+export type DashboardSelection = { gmvStores: string[] | null; sapoChannels: string[] | null; hidden: boolean }
 
 /** One GMV Max shop as reported through one advertiser. */
 export const pairKey = (advertiserId: string, storeId: string) => `${advertiserId}:${storeId}`
@@ -19,7 +20,7 @@ export function selectionOf(metadata: Record<string, unknown> | null | undefined
   const raw = metadata?.dashboard
   const dashboard = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {}
   const list = (value: unknown) => (Array.isArray(value) ? value.map(String) : null)
-  return { gmvStores: list(dashboard.gmvStores), sapoChannels: list(dashboard.sapoChannels) }
+  return { gmvStores: list(dashboard.gmvStores), sapoChannels: list(dashboard.sapoChannels), hidden: dashboard.hidden === true }
 }
 
 /** The same selection in any order gives one cache key. */

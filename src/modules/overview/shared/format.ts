@@ -50,6 +50,7 @@ export function useChartSetup() {
     formats: { moneyExact: exact, count, tick: (value: number) => formatCompact(value, locale) },
     text: {
       compare: t(`compareWith.${range}`),
+      current: t(`current.${range}`),
       previous: t(`previous.${range}`),
       toggle: t('toggleLine'),
       unitMoney: '₫',

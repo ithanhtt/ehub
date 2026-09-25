@@ -1,4 +1,4 @@
-import type { ConnectorAction, ConnectorPlugin, EndpointSpec, LocalizedText } from './types'
+import type { ConnectionGuide, ConnectorAction, ConnectorPlugin, EndpointSpec, LocalizedText } from './types'
 import { plugins } from '@/plugins'
 
 /**
@@ -95,6 +95,7 @@ export type PluginSummary = {
   authType: ConnectorPlugin['auth']['type']
   authFields: ConnectorPlugin['auth']['fields']
   authInstructions?: LocalizedText
+  authGuide?: ConnectionGuide
   endpointCount: number
   groups: string[]
   /** Repair tools the connector offers, already stripped of their run(). */
@@ -113,6 +114,7 @@ export function toPluginSummary(plugin: ConnectorPlugin): PluginSummary {
     authType: plugin.auth.type,
     authFields: plugin.auth.fields,
     authInstructions: plugin.auth.instructions,
+    authGuide: plugin.auth.guide,
     endpointCount: plugin.endpoints.length,
     groups: [...new Set(plugin.endpoints.map((e) => e.group))],
     actions: (plugin.actions ?? []).map(toActionSummary),

@@ -19,6 +19,26 @@ const RETRYABLE_STATUS = new Set([408, 425, 429, 500, 502, 503, 504])
 export interface SendOptions {
   timeoutMs?: number
   maxRetries?: number
+  /**
+   * Whether sending the request twice is harmless. A dropped connection
+   * (reset, refused, DNS hiccup) is retried only then: the provider may have
+   * acted on the first copy. Defaults to true for GET and HEAD; a POST that
+   * only reads (a search) says so.
+   */
+  idempotent?: boolean
+}
+
+/** Node's codes for a connection that failed on the way, not a request the provider refused. */
+const TRANSIENT_NETWORK = new Set(['ECONNRESET', 'ECONNREFUSED', 'EPIPE', 'ETIMEDOUT', 'EAI_AGAIN', 'ENETUNREACH', 'EHOSTUNREACH', 'UND_ERR_SOCKET', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT'])
+
+const causeCode = (error: unknown) => (error as { cause?: { code?: string } } | null)?.cause?.code
+
+/**
+ * Secrets never leave in an error: a token, key, secret or signature in a URL
+ * or a message is masked before the text reaches a log, the database or the page.
+ */
+export function redactSecrets(text: string): string {
+  return text.replace(/(\b(?:access_?token|refresh_?token|app_?secret|client_?secret|secret|api_?key|password|sign|signature|auth_?code)=)[^&\s"']+/gi, '$1***')
 }
 
 /**
@@ -33,6 +53,8 @@ export interface SendOptions {
 export async function sendRequest(request: PreparedRequest, options: SendOptions = {}): Promise<HttpResult> {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
   const maxRetries = options.maxRetries ?? 2
+  const method = (request.method ?? 'GET').toUpperCase()
+  const idempotent = options.idempotent ?? (method === 'GET' || method === 'HEAD')
   const started = Date.now()
 
   let attempt = 0
@@ -84,11 +106,13 @@ export async function sendRequest(request: PreparedRequest, options: SendOptions
     } catch (error) {
       clearTimeout(timer)
       const aborted = error instanceof Error && error.name === 'AbortError'
-      lastError = aborted ? `Request timed out after ${timeoutMs}ms` : describeError(error)
+      lastError = aborted ? `Request timed out after ${timeoutMs}ms` : redactSecrets(describeError(error))
 
       // A timeout usually means the provider is degraded, not that the request
       // is wrong, so it is worth one more try — but never more than the budget.
-      if (attempt < maxRetries && aborted) {
+      // A dropped connection too, when sending again cannot act twice.
+      const dropped = idempotent && TRANSIENT_NETWORK.has(causeCode(error) ?? '')
+      if (attempt < maxRetries && (aborted || dropped)) {
         await backoff(attempt, null)
         attempt += 1
         continue

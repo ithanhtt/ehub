@@ -1,7 +1,9 @@
 export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`
+  if (bytes < 1024 ** 3) return `${(bytes / (1024 * 1024)).toFixed(2)} MB`
+  if (bytes < 1024 ** 4) return `${(bytes / 1024 ** 3).toFixed(2)} GB`
+  return `${(bytes / 1024 ** 4).toFixed(2)} TB`
 }
 
 export function formatDuration(ms: number): string {
@@ -45,4 +47,18 @@ export function initialsOf(name: string): string {
       .map((part) => part[0]?.toUpperCase() ?? '')
       .join('') || '?'
   )
+}
+
+/**
+ * A line as it opens a sentence: its first letter capitalised ("hôm nay · …"
+ * → "Hôm nay · …"). Text opening with a figure or a sign is left as it is,
+ * and so is the rest of it — a period's name ("hôm nay") stays lowercase
+ * where it runs on inside a sentence, and is capitalised only where it leads.
+ */
+export function capitalizeFirst(text: string, locale?: string): string {
+  const first = text.codePointAt(0)
+  if (first === undefined) return text
+  const char = String.fromCodePoint(first)
+  if (!/\p{L}/u.test(char)) return text
+  return char.toLocaleUpperCase(locale) + text.slice(char.length)
 }
