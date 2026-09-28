@@ -8,6 +8,7 @@ import InitColorSchemeScript from '@mui/material/InitColorSchemeScript'
 import { ThemeProvider } from '@mui/material/styles'
 import { AppRouterCacheProvider } from '@mui/material-nextjs/v16-appRouter'
 import { AmbientBackground } from '@/components/layout/ambient-background'
+import { SiteCorner } from '@/modules/site-settings/ui/site-corner'
 import { APP_NAME } from '@/core/brand'
 import theme from '@/theme'
 
@@ -65,6 +66,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
                 {children}
               </NextIntlClientProvider>
             </Box>
+            <SiteCorner placement="floating" />
           </ThemeProvider>
         </AppRouterCacheProvider>
       </body>

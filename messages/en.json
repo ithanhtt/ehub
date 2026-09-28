@@ -72,7 +72,8 @@
     "noAccountsBody": "The database is empty, so every sign-in will fail. Register instead — the first account becomes the administrator.",
     "tooManyAttempts": "Too many sign-in attempts. Wait a moment and try again.",
     "signInInsecure": "This address cannot keep you signed in. Open the app at its secure address {url} and sign in again.",
-    "preparing": "Loading…"
+    "preparing": "Loading…",
+    "signInMaintenance": "The system is under maintenance — only system Administrators can sign in right now. Please come back later."
   },
   "nav": {
     "projects": "Projects",
@@ -1535,7 +1536,8 @@
       "system": "System",
       "database": "Database",
       "updates": "System update",
-      "adjustments": "Metric adjustments"
+      "adjustments": "Metric adjustments",
+      "settings": "Settings"
     },
     "units": {
       "days": "{n} d",
@@ -1827,6 +1829,67 @@
       "validation": "Something is not valid — check the amount and dates.",
       "notFound": "Project or adjustment not found (it may have been deleted).",
       "error": "Could not save — try again later."
+    }
+  },
+  "siteSettings": {
+    "title": "Settings",
+    "subtitle": "Maintenance mode and the small note in the bottom-right corner of the screen. Only system Administrators can see and change this page.",
+    "saved": "Settings saved.",
+    "errors": {
+      "forbidden": "Only system Administrators can do this.",
+      "validation": "Something is not valid.",
+      "error": "Could not save — try again later."
+    },
+    "maintenance": {
+      "title": "Maintenance mode",
+      "help": "While on, every user but system Administrators sees only \"The system is under maintenance, please come back later\" and no data. While a system update runs, it turns on by itself and off again when the update is done.",
+      "switch": "Maintenance mode on",
+      "message": "Extra message (optional)",
+      "messagePlaceholder": "e.g. Back by 22:00.",
+      "messageHelp": "Shown under the maintenance notice. Variables such as '{{'version'}}' work here too.",
+      "onNow": "Maintenance mode is on — other users see the maintenance notice.",
+      "updatingNow": "A system update is running — maintenance is on by itself until it is done.",
+      "confirmTitle": "Turn maintenance mode on?",
+      "confirmBody": "Every user who is not a system Administrator is kept out of the app until you turn this off. Pages they have open switch to the maintenance notice by themselves.",
+      "confirm": "Turn on"
+    },
+    "corner": {
+      "title": "Corner note",
+      "help": "A small line in the bottom-right corner of every page — e.g. \"Built by … · v'{{'version'}}'\". Variables such as '{{'version'}}' are filled in when shown.",
+      "switch": "Show the corner note",
+      "text": "Text",
+      "textPlaceholder": "e.g. Built by … · v'{{'version'}}'",
+      "preview": "Preview",
+      "hidden": "Hidden",
+      "textHelp": "You can use '{{'version'}}', '{{'year'}}', '{{'appName'}}' — {count}/{max} characters",
+      "placement": "Placement",
+      "placements": {
+        "floating": "Floating in the corner",
+        "footer": "Fixed at the page foot"
+      },
+      "placementHelp": {
+        "floating": "Always in the bottom-right corner of the screen, even while scrolling.",
+        "footer": "At the end of the page, right-aligned — seen on scrolling to the bottom; on a short page, at the bottom of the screen."
+      }
+    },
+    "banner": {
+      "manual": "Maintenance mode is on — other users see the maintenance notice.",
+      "updating": "A system update is running — other users see the maintenance notice until it is done.",
+      "open": "Settings"
+    },
+    "notice": {
+      "title": "The system is under maintenance",
+      "updatingTitle": "The system is being updated",
+      "body": "Please come back later.",
+      "autoReload": "This page reloads by itself when the system is back.",
+      "adminOnly": "Only system Administrators can sign in meanwhile.",
+      "registerClosed": "Sign-up is paused during maintenance."
+    },
+    "variables": "Insert variable:",
+    "variableHelp": {
+      "version": "The app version running now (now: {value})",
+      "year": "The current year (now: {value})",
+      "appName": "The app name (now: {value})"
     }
   }
 }

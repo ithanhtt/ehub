@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from 'next/server'
 import { redactSecrets } from '@/core/plugins/http'
 import { assertCapability } from '@/core/auth/session'
 import { dashboardCatalog } from '@/modules/overview/data/overview'
+import { closedForMaintenance } from '@/modules/site-settings/data/gate'
 
 /**
  * The store's product catalog, each product with its latest order — for the
@@ -12,6 +13,9 @@ import { dashboardCatalog } from '@/modules/overview/data/overview'
  * Any project member may look: it only reads.
  */
 export async function GET(_request: NextRequest, { params }: { params: Promise<{ projectId: string }> }) {
+  // Closed for maintenance: nothing is read or sent for anyone but an Administrator.
+  const closed = await closedForMaintenance()
+  if (closed) return closed
   const { projectId } = await params
   try {
     await assertCapability(projectId, 'connection:view')

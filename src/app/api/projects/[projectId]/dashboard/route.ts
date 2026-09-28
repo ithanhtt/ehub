@@ -4,6 +4,7 @@ import { assertCapability } from '@/core/auth/session'
 import { dashboardData } from '@/modules/overview/data/overview'
 import { customRangeProblem, periodOf } from '@/modules/overview/data/period'
 import { DASHBOARD_RANGES, type DashboardRange } from '@/modules/overview/data/types'
+import { closedForMaintenance } from '@/modules/site-settings/data/gate'
 
 /**
  * Data for the overview dashboard, polled by the page every fifteen seconds.
@@ -21,6 +22,9 @@ import { DASHBOARD_RANGES, type DashboardRange } from '@/modules/overview/data/t
  * Any project member may look: the dashboard only reads.
  */
 export async function GET(request: NextRequest, { params }: { params: Promise<{ projectId: string }> }) {
+  // Closed for maintenance: nothing is read or sent for anyone but an Administrator.
+  const closed = await closedForMaintenance()
+  if (closed) return closed
   const { projectId } = await params
   const search = request.nextUrl.searchParams
   const range = search.get('range') ?? 'today'

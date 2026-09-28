@@ -161,6 +161,8 @@ export function OverviewDashboard({
       try {
         const reply = (async () => {
           const response = await fetch(`/api/projects/${projectId}/dashboard?range=${q}`, { cache: 'no-store' })
+          // Closed for maintenance: reloaded, the layout shows the notice.
+          if (response.status === 503 && response.headers.get('x-maintenance')) window.location.reload()
           if (!response.ok) throw new Error(response.status === 403 ? t('forbidden') : `HTTP ${response.status}`)
           return (await response.json()) as DashboardData
         })()

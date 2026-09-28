@@ -56,7 +56,9 @@ export function LoginForm({ freshInstall }: { freshInstall: boolean }) {
           ? t('signInInsecure', { url: state.url ?? '' })
           : state.error === 'unavailable'
             ? t('signInUnavailable')
-            : null
+            : state.error === 'maintenance'
+              ? t('signInMaintenance')
+              : null
 
   return (
     <Card sx={{ boxShadow: '0 12px 32px -18px rgb(0 0 0 / 0.28)' }}>

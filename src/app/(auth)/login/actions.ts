@@ -1,9 +1,13 @@
 'use server'
 
-import { headers } from 'next/headers'
+import { cookies, headers } from 'next/headers'
+import { eq } from 'drizzle-orm'
 import { redirect } from 'next/navigation'
 import { isAPIError } from 'better-auth/api'
 import { auth } from '@/core/auth/auth'
+import { db } from '@/core/db/client'
+import { session } from '@/core/db/schema/auth'
+import { closedFor } from '@/modules/site-settings/data/settings'
 import { redactSecrets } from '@/core/plugins/http'
 import { clientAddress, recordSignInFailure, recordSignInSuccess, safeNext, signInAllowed } from '@/core/auth/sign-in-throttle'
 
@@ -25,7 +29,7 @@ import { clientAddress, recordSignInFailure, recordSignInSuccess, safeNext, sign
  */
 
 export type SignInState = {
-  error: null | 'invalid' | 'tooMany' | 'insecure' | 'unavailable'
+  error: null | 'invalid' | 'tooMany' | 'insecure' | 'unavailable' | 'maintenance'
   /** Kept, so a failed try does not make the reader type the address again. */
   email: string
   /** The address to open the app at, when the one used cannot keep the session. */
@@ -52,8 +56,9 @@ export async function signInAction(_previous: SignInState, form: FormData): Prom
     return { error: 'insecure', email, url: base }
   }
 
+  let signedIn: Awaited<ReturnType<typeof auth.api.signInEmail>>
   try {
-    await auth.api.signInEmail({ body: { email, password }, headers: requestHeaders })
+    signedIn = await auth.api.signInEmail({ body: { email, password }, headers: requestHeaders })
   } catch (error) {
     const status = isAPIError(error) ? ((error as { statusCode?: number }).statusCode ?? 0) : 0
     if (status === 401) {
@@ -65,6 +70,17 @@ export async function signInAction(_previous: SignInState, form: FormData): Prom
     return { error: 'unavailable', email }
   }
   recordSignInSuccess(email)
+  // Closed for maintenance: only a platform Administrator gets in. The session just made is undone, cookies and all.
+  const role = (signedIn.user as { role?: string | null }).role === 'admin' ? 'admin' : 'user'
+  if (await closedFor({ role })) {
+    if (signedIn.token) await db.delete(session).where(eq(session.token, signedIn.token))
+    const jar = await cookies()
+    for (const name of ['session_token', 'session_data', 'dont_remember']) {
+      jar.delete(`better-auth.${name}`)
+      jar.delete({ name: `__Secure-better-auth.${name}`, secure: true })
+    }
+    return { error: 'maintenance', email }
+  }
   // Outside the try: redirect() works by throwing.
   redirect(next)
 }

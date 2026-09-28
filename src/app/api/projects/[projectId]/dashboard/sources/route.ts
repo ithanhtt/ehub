@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from 'next/server'
 import { redactSecrets } from '@/core/plugins/http'
 import { assertCapability } from '@/core/auth/session'
 import { dashboardSources } from '@/modules/overview/data/overview'
+import { closedForMaintenance } from '@/modules/site-settings/data/gate'
 
 /**
  * The shops and sales channels the dashboard can count, and the current
@@ -9,6 +10,9 @@ import { dashboardSources } from '@/modules/overview/data/overview'
  * saving goes through a server action that needs the connection-edit right.
  */
 export async function GET(_request: NextRequest, { params }: { params: Promise<{ projectId: string }> }) {
+  // Closed for maintenance: nothing is read or sent for anyone but an Administrator.
+  const closed = await closedForMaintenance()
+  if (closed) return closed
   const { projectId } = await params
   try {
     await assertCapability(projectId, 'connection:view')

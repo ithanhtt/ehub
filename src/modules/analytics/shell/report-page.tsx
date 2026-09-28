@@ -129,6 +129,8 @@ export function ReportPage({
       setLoading(true)
       try {
         const response = await fetch(`/api/projects/${projectId}/reports/${moduleId}?${q}`, { cache: 'no-store' })
+        // Closed for maintenance: reloaded, the layout shows the notice.
+        if (response.status === 503 && response.headers.get('x-maintenance')) window.location.reload()
         if (!response.ok) throw new Error(response.status === 403 ? t('forbidden') : `HTTP ${response.status}`)
         const next = (await response.json()) as ReportEnvelope<unknown>
         if (id === latest.current) {

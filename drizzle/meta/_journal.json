@@ -43,6 +43,13 @@
       "when": 1790567762447,
       "tag": "0005_metric_adjustments",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1790569265110,
+      "tag": "0006_app_settings",
+      "breakpoints": true
     }
   ]
 }

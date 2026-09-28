@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { assertCapability } from '@/core/auth/session'
 import { CustomRequestError, executeCustomRequest } from '@/core/plugins/execute-custom'
 import { ALLOWED_METHODS, SAFE_METHODS } from '@/core/plugins/custom-path'
+import { closedForMaintenance } from '@/modules/site-settings/data/gate'
 
 /**
  * Sends a request to a path the catalogue does not declare.
@@ -27,6 +28,9 @@ const bodySchema = z.object({
 })
 
 export async function POST(request: Request) {
+  // Closed for maintenance: nothing is read or sent for anyone but an Administrator.
+  const closed = await closedForMaintenance()
+  if (closed) return closed
   let payload: z.infer<typeof bodySchema>
   try {
     payload = bodySchema.parse(await request.json())

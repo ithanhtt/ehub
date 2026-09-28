@@ -8,6 +8,7 @@ import { auth } from './auth'
 import { can, type Capability } from './rbac'
 import { db } from '@/core/db/client'
 import { projectMembers, projects, type ProjectRole } from '@/core/db/schema/projects'
+import { closedFor } from '@/modules/site-settings/data/settings'
 
 export type CurrentUser = {
   id: string
@@ -64,10 +65,15 @@ export type ProjectContext = {
 /**
  * Resolves a project *through the membership table*, so an unauthorised
  * project id is indistinguishable from a missing one — no existence oracle.
+ *
+ * While the app is closed for maintenance, no project opens for anyone but a
+ * platform Administrator: every page, action and route that goes through here
+ * (all of a project's) is refused, whatever the user's role in it.
  */
 export const getProjectContext = cache(async (projectId: string): Promise<ProjectContext | null> => {
   const user = await getCurrentUser()
   if (!user) return null
+  if (await closedFor(user)) return null
 
   const [row] = await db
     .select({ project: projects, role: projectMembers.role })

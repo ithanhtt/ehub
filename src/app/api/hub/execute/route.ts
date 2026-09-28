@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server'
 import { z } from 'zod'
 import { assertCapability } from '@/core/auth/session'
 import { executeEndpoint } from '@/core/plugins/execute'
+import { closedForMaintenance } from '@/modules/site-settings/data/gate'
 
 /**
  * The Hub's execute endpoint.
@@ -19,6 +20,9 @@ const bodySchema = z.object({
 })
 
 export async function POST(request: Request) {
+  // Closed for maintenance: nothing is read or sent for anyone but an Administrator.
+  const closed = await closedForMaintenance()
+  if (closed) return closed
   let payload: z.infer<typeof bodySchema>
   try {
     payload = bodySchema.parse(await request.json())

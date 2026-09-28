@@ -9,6 +9,7 @@ import { user } from '@/core/db/schema/auth'
 import { auditLogs } from '@/core/db/schema/audit'
 import { projectInvitations, projectMembers, projects, type ProjectRole } from '@/core/db/schema/projects'
 import { assertCapability, getCurrentUser, requireUser } from '@/core/auth/session'
+import { closedFor } from '@/modules/site-settings/data/settings'
 import { ASSIGNABLE_ROLES, isProjectRole, outranks } from '@/core/auth/rbac'
 import { createId, createToken, slugify } from '@/core/utils/id'
 
@@ -29,6 +30,7 @@ const createProjectSchema = z.object({
 
 export async function createProject(_prev: ActionState, formData: FormData): Promise<ActionState> {
   const currentUser = await requireUser()
+  if (await closedFor(currentUser)) return fail('maintenance')
 
   const parsed = createProjectSchema.safeParse({
     name: formData.get('name'),
@@ -288,6 +290,7 @@ export async function removeMember(projectId: string, membershipId: string): Pro
 export async function acceptInvitation(token: string): Promise<ActionState> {
   const currentUser = await getCurrentUser()
   if (!currentUser) return fail('unauthenticated')
+  if (await closedFor(currentUser)) return fail('maintenance')
 
   const [invitation] = await db
     .select()

@@ -72,7 +72,8 @@
     "noAccountsBody": "Cơ sở dữ liệu đang rỗng, nên mọi lần đăng nhập đều thất bại. Hãy đăng ký — tài khoản đầu tiên sẽ trở thành quản trị viên.",
     "tooManyAttempts": "Bạn đã thử đăng nhập quá nhiều lần. Hãy đợi một lát rồi thử lại.",
     "signInInsecure": "Không giữ được phiên đăng nhập trên địa chỉ này. Hãy mở ứng dụng bằng địa chỉ bảo mật {url} rồi đăng nhập lại.",
-    "preparing": "Đang tải…"
+    "preparing": "Đang tải…",
+    "signInMaintenance": "Hệ thống đang bảo trì — chỉ Quản trị viên hệ thống đăng nhập được lúc này. Vui lòng quay lại sau."
   },
   "nav": {
     "projects": "Dự án",
@@ -1535,7 +1536,8 @@
       "system": "Hệ thống",
       "database": "Cơ sở dữ liệu",
       "updates": "Cập nhật hệ thống",
-      "adjustments": "Điều chỉnh số liệu"
+      "adjustments": "Điều chỉnh số liệu",
+      "settings": "Cài đặt"
     },
     "units": {
       "days": "{n} ngày",
@@ -1827,6 +1829,67 @@
       "validation": "Thông tin chưa hợp lệ — kiểm tra số tiền và ngày.",
       "notFound": "Không tìm thấy dự án hoặc điều chỉnh (có thể đã bị xoá).",
       "error": "Không lưu được, thử lại sau."
+    }
+  },
+  "siteSettings": {
+    "title": "Cài đặt",
+    "subtitle": "Chế độ bảo trì và dòng thông tin nhỏ ở góc dưới bên phải màn hình. Chỉ Quản trị viên hệ thống thấy và sửa được trang này.",
+    "saved": "Đã lưu cài đặt.",
+    "errors": {
+      "forbidden": "Chỉ Quản trị viên hệ thống được làm việc này.",
+      "validation": "Thông tin chưa hợp lệ.",
+      "error": "Không lưu được, thử lại sau."
+    },
+    "maintenance": {
+      "title": "Chế độ bảo trì",
+      "help": "Khi bật, mọi người dùng (trừ Quản trị viên hệ thống) chỉ thấy thông báo \"Hệ thống đang bảo trì, vui lòng quay lại sau\" và không xem được dữ liệu. Khi đang cập nhật hệ thống, chế độ này tự bật và tự tắt khi cập nhật xong.",
+      "switch": "Bật chế độ bảo trì",
+      "message": "Lời nhắn thêm (không bắt buộc)",
+      "messagePlaceholder": "Ví dụ: Dự kiến hoạt động lại lúc 22:00.",
+      "messageHelp": "Hiển thị bên dưới thông báo bảo trì. Có thể dùng biến như '{{'version'}}'.",
+      "onNow": "Chế độ bảo trì đang bật — người dùng khác đang thấy thông báo bảo trì.",
+      "updatingNow": "Hệ thống đang cập nhật — chế độ bảo trì đang tự bật cho tới khi cập nhật xong.",
+      "confirmTitle": "Bật chế độ bảo trì?",
+      "confirmBody": "Mọi người dùng không phải Quản trị viên hệ thống sẽ không vào được ứng dụng cho tới khi bạn tắt chế độ này. Các trang đang mở của họ sẽ tự chuyển sang thông báo bảo trì.",
+      "confirm": "Bật bảo trì"
+    },
+    "corner": {
+      "title": "Thông tin góc màn hình",
+      "help": "Một dòng chữ nhỏ ở góc dưới bên phải mọi trang — ví dụ \"Phát triển bởi … · v'{{'version'}}'\". Các biến như '{{'version'}}' được thay bằng giá trị thật khi hiển thị.",
+      "switch": "Hiển thị thông tin ở góc màn hình",
+      "text": "Nội dung",
+      "textPlaceholder": "Ví dụ: Phát triển bởi … · v'{{'version'}}'",
+      "preview": "Xem trước",
+      "hidden": "Đang ẩn",
+      "textHelp": "Có thể dùng '{{'version'}}', '{{'year'}}', '{{'appName'}}' — {count}/{max} ký tự",
+      "placement": "Vị trí hiển thị",
+      "placements": {
+        "floating": "Nổi ở góc màn hình",
+        "footer": "Cố định cuối trang"
+      },
+      "placementHelp": {
+        "floating": "Luôn nằm ở góc dưới bên phải màn hình, kể cả khi cuộn trang.",
+        "footer": "Nằm ở cuối trang, căn phải — cuộn xuống cuối mới thấy; trang ngắn thì nằm sát đáy màn hình."
+      }
+    },
+    "banner": {
+      "manual": "Chế độ bảo trì đang bật — người dùng khác đang thấy thông báo bảo trì.",
+      "updating": "Hệ thống đang cập nhật — người dùng khác đang thấy thông báo bảo trì cho tới khi xong.",
+      "open": "Cài đặt"
+    },
+    "notice": {
+      "title": "Hệ thống đang bảo trì",
+      "updatingTitle": "Hệ thống đang cập nhật",
+      "body": "Vui lòng quay lại sau.",
+      "autoReload": "Trang sẽ tự tải lại khi hệ thống hoạt động trở lại.",
+      "adminOnly": "Trong thời gian này chỉ Quản trị viên hệ thống đăng nhập được.",
+      "registerClosed": "Tạm dừng đăng ký tài khoản trong thời gian bảo trì."
+    },
+    "variables": "Chèn biến:",
+    "variableHelp": {
+      "version": "Phiên bản ứng dụng hiện tại (bây giờ: {value})",
+      "year": "Năm hiện tại (bây giờ: {value})",
+      "appName": "Tên ứng dụng (bây giờ: {value})"
     }
   }
 }

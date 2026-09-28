@@ -3,6 +3,7 @@ import { redactSecrets } from '@/core/plugins/http'
 import { assertCapability } from '@/core/auth/session'
 import { GRANULARITIES, REPORT_RANGES, reportPeriodOf, reportRangeProblem, type Granularity, type ReportRange } from '@/modules/analytics/period'
 import { REPORT_BUILDERS } from '@/modules/reports'
+import { closedForMaintenance } from '@/modules/site-settings/data/gate'
 
 /**
  * One report module's answer: `?range=7d|30d|90d&granularity=day|month`, or
@@ -14,6 +15,9 @@ import { REPORT_BUILDERS } from '@/modules/reports'
  * project member may look — the reports only read.
  */
 export async function GET(request: NextRequest, { params }: { params: Promise<{ projectId: string; reportId: string }> }) {
+  // Closed for maintenance: nothing is read or sent for anyone but an Administrator.
+  const closed = await closedForMaintenance()
+  if (closed) return closed
   const { projectId, reportId } = await params
   const build = Object.hasOwn(REPORT_BUILDERS, reportId) ? REPORT_BUILDERS[reportId] : undefined
   if (!build) return NextResponse.json({ error: 'UNKNOWN_REPORT' }, { status: 404 })
