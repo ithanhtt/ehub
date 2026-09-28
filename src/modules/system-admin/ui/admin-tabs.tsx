@@ -8,15 +8,17 @@ import Tabs from '@mui/material/Tabs'
 import DnsOutlined from '@mui/icons-material/DnsOutlined'
 import StorageOutlined from '@mui/icons-material/StorageOutlined'
 import SystemUpdateAltOutlined from '@mui/icons-material/SystemUpdateAltOutlined'
+import TuneOutlined from '@mui/icons-material/TuneOutlined'
 
 /**
- * The admin area's tab bar: System, Database, System update. Plain links —
+ * The admin area's tab bar: System, Database, Metric adjustments, System update. Plain links —
  * the theme gives ButtonBase NextLink, so a Tab with an href navigates
  * client-side — with the tab under the current path marked.
  */
 const TABS = [
   { href: '/admin/system', key: 'system', icon: <DnsOutlined fontSize="small" /> },
   { href: '/admin/database', key: 'database', icon: <StorageOutlined fontSize="small" /> },
+  { href: '/admin/adjustments', key: 'adjustments', icon: <TuneOutlined fontSize="small" /> },
   { href: '/admin/updates', key: 'updates', icon: <SystemUpdateAltOutlined fontSize="small" /> },
 ] as const
 
@@ -36,7 +38,7 @@ export function AdminTabs() {
               href={tab.href}
               icon={tab.icon}
               iconPosition="start"
-              label={tab.key === 'system' ? t('tabs.system') : tab.key === 'database' ? t('tabs.database') : t('tabs.updates')}
+              label={t(`tabs.${tab.key}`)}
               sx={{ minHeight: 48 }}
             />
           ))}

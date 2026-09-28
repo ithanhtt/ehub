@@ -325,6 +325,19 @@ const theme = createTheme({
       },
     },
 
+    /*
+     * Text fields on a touch screen at 16px: iOS Safari zooms the page in on
+     * any field whose text is smaller as it takes focus, and the page is left
+     * wider than the screen, scrolling sideways. Only where the pointer is a
+     * finger — a desk keeps the app's 14px — and never by capping the zoom
+     * (maximum-scale), which would also stop people pinching to read.
+     */
+    MuiInputBase: {
+      styleOverrides: {
+        input: { '@media (pointer: coarse)': { fontSize: 16 } },
+      },
+    },
+
     MuiTextField: { defaultProps: { size: 'small', fullWidth: true } },
     MuiSelect: { defaultProps: { size: 'small' } },
     MuiFormControl: { defaultProps: { size: 'small' } },

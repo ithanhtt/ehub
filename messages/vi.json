@@ -1534,7 +1534,8 @@
       "label": "Quản trị hệ thống",
       "system": "Hệ thống",
       "database": "Cơ sở dữ liệu",
-      "updates": "Cập nhật hệ thống"
+      "updates": "Cập nhật hệ thống",
+      "adjustments": "Điều chỉnh số liệu"
     },
     "units": {
       "days": "{n} ngày",
@@ -1768,6 +1769,64 @@
         "auditTrail": "Bị chặn: nhật ký thao tác (audit_logs) chỉ được ghi thêm bởi ứng dụng, không sửa hay xoá từ đây.",
         "migrations": "Bị chặn: bảng lịch sử migration của drizzle không được sửa — lần cập nhật sau sẽ chạy sai."
       }
+    }
+  },
+  "adjustments": {
+    "title": "Điều chỉnh số liệu",
+    "subtitle": "Cộng thêm hoặc trừ bớt vào các chỉ số trên trang Tổng quan của từng dự án — ví dụ doanh thu từ một nguồn cố định khác. Dashboard hiển thị số đã cộng/trừ, giữ nguyên mọi tiêu đề và mô tả. Chỉ Quản trị viên hệ thống thấy và sửa được trang này.",
+    "add": "Thêm điều chỉnh",
+    "addTitle": "Thêm điều chỉnh",
+    "editTitle": "Sửa điều chỉnh",
+    "edit": "Sửa",
+    "delete": "Xoá",
+    "deleteTitle": "Xoá điều chỉnh này?",
+    "deleteBody": "{metric} {amount} của dự án {project} sẽ không còn được tính vào dashboard.",
+    "project": "Dự án",
+    "allProjects": "Tất cả dự án",
+    "metric": "Chỉ số",
+    "amount": "Số tiền",
+    "period": "Thời gian",
+    "perDay": "Mỗi ngày",
+    "note": "Ghi chú",
+    "notePlaceholder": "Ví dụ: doanh thu cửa hàng offline",
+    "listTitle": "Các điều chỉnh ({count})",
+    "empty": "Chưa có điều chỉnh nào — các chỉ số đang hiển thị đúng như số liệu gốc.",
+    "noProjects": "Chưa có dự án nào.",
+    "plus": "Cộng thêm",
+    "minus": "Trừ bớt",
+    "periodLabel": "Áp dụng cho",
+    "kinds": {
+      "day": "Một ngày",
+      "month": "Một tháng",
+      "year": "Một năm",
+      "range": "Khoảng ngày"
+    },
+    "day": "Ngày",
+    "month": "Tháng",
+    "year": "Năm",
+    "from": "Từ ngày",
+    "to": "Đến ngày",
+    "monthName": "Tháng {n}",
+    "spreadLabel": "Cách tính số tiền",
+    "spreadTotal": "Tổng cho cả kỳ (chia đều từng ngày)",
+    "spreadDaily": "Mỗi ngày cộng số này",
+    "spreadTotalShort": "tổng cả kỳ",
+    "spreadDailyShort": "mỗi ngày",
+    "days": "{count} ngày",
+    "preview": "trong {days} ngày, khoảng {perDay}/ngày vào «{metric}».",
+    "saved": "Đã lưu điều chỉnh.",
+    "deleted": "Đã xoá điều chỉnh.",
+    "metrics": {
+      "sapoRevenue": "Doanh thu cửa hàng (Sapo)",
+      "shopSales": "Doanh số (TikTok Shop)",
+      "adsCost": "Chi phí quảng cáo (TikTok Ads)",
+      "adsRevenue": "GMV quảng cáo (TikTok GMV Max)"
+    },
+    "errors": {
+      "forbidden": "Chỉ Quản trị viên hệ thống được làm việc này.",
+      "validation": "Thông tin chưa hợp lệ — kiểm tra số tiền và ngày.",
+      "notFound": "Không tìm thấy dự án hoặc điều chỉnh (có thể đã bị xoá).",
+      "error": "Không lưu được, thử lại sau."
     }
   }
 }

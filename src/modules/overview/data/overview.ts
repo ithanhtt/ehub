@@ -8,6 +8,7 @@ import type { ConnectionContext } from '@/core/plugins/types'
 import { warnThrottled } from '@/core/utils/log'
 import { gmvProductHours } from '@/modules/analytics/data/gmv-max'
 import { freshContext } from '@/core/plugins/fresh-credentials'
+import { withAdjustments } from '@/modules/metric-adjustments/data/apply'
 import { advertisersOf, gmvMaxOverview, listGmvPairs } from './gmv-max'
 import { tiktokShopOverview } from './tiktok-shop'
 import { listSapoChannels, sapoCatalog, sapoOverview } from './sapo'
@@ -202,14 +203,15 @@ export async function dashboardData(projectId: string, period: Period): Promise<
     for (const item of gmvMax.products.items) if (item.name === item.id && shopNames.has(item.id)) item.name = shopNames.get(item.id)!
   }
 
-  return {
+  // The amounts an Administrator set for the project are folded in last, as if read with the rest.
+  return withAdjustments(projectId, period, {
     range: period.range,
     period: { start: period.start, end: period.end, days: period.days },
     generatedAt: new Date().toISOString(),
     gmvMax,
     tiktokShop: shopData,
     sapo: sapoData,
-  }
+  })
 }
 
 /** The Sapo catalog for the quiet-products list's "all products" view; null without a Sapo connection. */

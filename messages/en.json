@@ -1534,7 +1534,8 @@
       "label": "System administration",
       "system": "System",
       "database": "Database",
-      "updates": "System update"
+      "updates": "System update",
+      "adjustments": "Metric adjustments"
     },
     "units": {
       "days": "{n} d",
@@ -1768,6 +1769,64 @@
         "auditTrail": "Blocked: the audit trail (audit_logs) is only appended to by the app, never edited or deleted from here.",
         "migrations": "Blocked: drizzle’s migration history is not edited — the next update would run the wrong migrations."
       }
+    }
+  },
+  "adjustments": {
+    "title": "Metric adjustments",
+    "subtitle": "Add to or take off a project's Overview figures — revenue from another fixed source, say. The dashboard shows the adjusted figures, every title and description unchanged. Only system Administrators can see and change this page.",
+    "add": "Add adjustment",
+    "addTitle": "Add adjustment",
+    "editTitle": "Edit adjustment",
+    "edit": "Edit",
+    "delete": "Delete",
+    "deleteTitle": "Delete this adjustment?",
+    "deleteBody": "{metric} {amount} on {project} will no longer count on the dashboard.",
+    "project": "Project",
+    "allProjects": "All projects",
+    "metric": "Metric",
+    "amount": "Amount",
+    "period": "Period",
+    "perDay": "Per day",
+    "note": "Note",
+    "notePlaceholder": "e.g. offline store revenue",
+    "listTitle": "Adjustments ({count})",
+    "empty": "No adjustments — the figures show exactly as read.",
+    "noProjects": "No projects yet.",
+    "plus": "Add",
+    "minus": "Subtract",
+    "periodLabel": "Applies to",
+    "kinds": {
+      "day": "A day",
+      "month": "A month",
+      "year": "A year",
+      "range": "Date range"
+    },
+    "day": "Day",
+    "month": "Month",
+    "year": "Year",
+    "from": "From",
+    "to": "To",
+    "monthName": "Month {n}",
+    "spreadLabel": "How the amount counts",
+    "spreadTotal": "Total for the period (split evenly by day)",
+    "spreadDaily": "This amount every day",
+    "spreadTotalShort": "period total",
+    "spreadDailyShort": "per day",
+    "days": "{count, plural, one {# day} other {# days}}",
+    "preview": "over {days} days, about {perDay}/day on “{metric}”.",
+    "saved": "Adjustment saved.",
+    "deleted": "Adjustment deleted.",
+    "metrics": {
+      "sapoRevenue": "Store revenue (Sapo)",
+      "shopSales": "Sales (TikTok Shop)",
+      "adsCost": "Ad spend (TikTok Ads)",
+      "adsRevenue": "Ads GMV (TikTok GMV Max)"
+    },
+    "errors": {
+      "forbidden": "Only system Administrators can do this.",
+      "validation": "Something is not valid — check the amount and dates.",
+      "notFound": "Project or adjustment not found (it may have been deleted).",
+      "error": "Could not save — try again later."
     }
   }
 }
